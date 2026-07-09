@@ -36,3 +36,13 @@ jobs:
           tags: knowledge-pipeline:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Init (no backend, no creds)
+        run: terraform -chdir=infra init -backend=false
+      - name: Validate
+        run: terraform -chdir=infra validate
