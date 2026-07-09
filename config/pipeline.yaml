@@ -1,0 +1,33 @@
+# Knowledge pipeline — global config. Model registry, storage selector, paths, thresholds.
+pipeline_version: "0.1.0"
+
+paths:
+  db: data/pipeline.db
+  intermediate: data/intermediate
+  vault: vault
+
+storage:
+  # The ONLY cloud-specific abstraction (plan §14). Flip to `s3` for EC2; nothing else changes.
+  blobstore: local        # local | s3
+  local:
+    root: data/raw        # content-addressed: <root>/sha256/ab/cd/<hash>/artifact.*
+  s3:
+    bucket: change-me
+    prefix: raw
+    region: us-east-1
+
+# task → model registry (swap point). Consumed by the derivation stages in build step 5.
+# Present now so the registry shape is stable; steps 1–2 make no LLM calls.
+models:
+  extract_claims:  {model: claude-haiku-4-5,  batch: true}
+  dedup_confirm:   {model: claude-haiku-4-5,  batch: true}
+  speaker_map:     {model: claude-haiku-4-5,  batch: true}
+  structure_notes: {model: claude-sonnet-4-6, batch: true}
+  synthesize_hub:  {model: claude-sonnet-4-6, batch: false}
+
+embeddings:
+  dedup: {model: nomic-embed-text-v1.5, local: true}   # write-time dedup, build step 5
+
+worker:
+  poll_interval_seconds: 2.0
+  max_attempts: 3

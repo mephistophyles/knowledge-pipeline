@@ -1,0 +1,17 @@
+# Runtime data — NOT in the repo (per plan §2). Raw blobs, DB, intermediates.
+/data/
+# The vault is a separate private git repo mounted alongside.
+/vault/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Env / secrets
+.env
+
+# OS
+.DS_Store

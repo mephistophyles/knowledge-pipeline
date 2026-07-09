@@ -1,0 +1,76 @@
+# Tier-1 control-box stack (plan §14.1). One `docker compose up` runs the whole
+# always-on box locally: orchestrator + workers + dashboard + litestream, all
+# against ./data/pipeline.db (the single SQLite writer boundary).
+#
+# The GPU burst worker (tier 2) is NOT here — it's an ephemeral spot instance
+# launched on demand in build step 4.
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  image: knowledge-pipeline:local
+  volumes:
+    - ./data:/app/data          # DB, raw store, intermediates
+    - ./vault:/app/vault        # the Obsidian vault git repo
+    - ./config:/app/config      # edit config without a rebuild
+  environment:
+    - PIPELINE_CONFIG=config/pipeline.yaml
+  restart: unless-stopped
+
+services:
+  # Bootstrap DB + vault once, then exit. Other services wait on it.
+  init:
+    <<: *app
+    restart: "no"
+    command: ["init"]
+
+  orchestrator:
+    <<: *app
+    command: ["scheduler"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  worker-io:
+    <<: *app
+    command: ["worker", "io"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  worker-llm:
+    <<: *app
+    command: ["worker", "llm"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  worker-cheap:
+    <<: *app
+    command: ["worker", "cheap"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  dashboard:
+    <<: *app
+    entrypoint: ["uvicorn"]
+    command: ["dashboard.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"           # nginx fronts this on EC2 (plan §14.3); never exposed directly there
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  # Continuous SQLite backup. Local: file replica (no AWS). EC2: swap to S3.
+  litestream:
+    image: litestream/litestream:0.3
+    volumes:
+      - ./data:/data
+      - ./docker/litestream.yml:/etc/litestream.yml:ro
+    command: ["replicate"]
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully

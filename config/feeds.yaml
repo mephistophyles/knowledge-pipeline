@@ -1,0 +1,26 @@
+# Per-source registry (plan §6.0). Attribution mode drives diarization + claim authorship.
+# Used by the spine ingestors in build step 3; sample entries here fix the schema now.
+feeds:
+  - id: podcast:acquired
+    type: podcast
+    enabled: true
+    attribution: show          # insights attributed to the show/episode only
+    diarize: false
+    batch_limit: 25
+    priority: 5
+
+  - id: podcast:invest-like-the-best
+    type: podcast
+    enabled: true
+    attribution: guest         # insights attributed to speaker entity + episode
+    hosts: ["Patrick O'Shaughnessy"]
+    diarize: true
+    batch_limit: 25
+    priority: 5
+
+  - id: blog:stratechery
+    type: web
+    enabled: true
+    attribution: show          # single-author blog: author == source
+    batch_limit: 50
+    priority: 3

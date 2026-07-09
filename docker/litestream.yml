@@ -1,0 +1,13 @@
+# Litestream continuous replication of the SQLite control plane (plan §14.2).
+# Local compose replicates to a file replica so the stack runs with zero AWS.
+# On EC2, swap the `file` replica for an `s3` one (bucket/path + IAM instance
+# profile) — point-in-time backup for ~$0. Restore: `litestream restore`.
+dbs:
+  - path: /data/pipeline.db
+    replicas:
+      - type: file
+        path: /data/litestream-replica
+      # - type: s3
+      #   bucket: your-bucket
+      #   path: pipeline.db
+      #   region: us-east-1
