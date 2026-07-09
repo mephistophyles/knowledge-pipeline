@@ -11,6 +11,10 @@ from pathlib import Path
 
 import frontmatter
 
+# Identity the pipeline commits under (distinct from your own commentary commits).
+COMMITTER_NAME = "knowledge-pipeline"
+COMMITTER_EMAIL = "pipeline@localhost"
+
 # Directory layout inside the vault (plan §2).
 SUBDIRS = [
     "corpus/sources",
@@ -34,8 +38,15 @@ class VaultWriter:
             gk = self.root / sub / ".gitkeep"
             if not gk.exists():
                 gk.write_text("")
-        if not (self.root / ".git").exists():
+        first_init = not (self.root / ".git").exists()
+        if first_init:
             self._git("init", "-q")
+        # The pipeline owns its committer identity so commits work regardless of
+        # host git config (CI runners and a fresh EC2 box have none). This also
+        # distinguishes pipeline commits from your own commentary commits.
+        self._git("config", "user.name", COMMITTER_NAME)
+        self._git("config", "user.email", COMMITTER_EMAIL)
+        if first_init:
             self._git("add", "-A")
             self._git("commit", "-q", "-m", "[init] vault layout", _allow_empty=True)
 
