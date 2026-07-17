@@ -26,15 +26,19 @@ def settings(tmp_path):
         "models": {
             "extract_claims": {"provider": "fake", "model": "fake-1", "params": {}, "prompt_version": "v1"},
             "dedup": {"provider": "fake", "model": "fake-confirm", "params": {}, "prompt_version": "v1"},
+            "entities": {"provider": "fake", "model": "fake-ent", "params": {}, "prompt_version": "v1"},
         },
         "embeddings": {"provider": "fake", "model": "fake-embed"},
         "dedup": {"max_distance": 0.6, "shortlist_k": 5},
+        "entities": {"max_distance": 0.6, "shortlist_k": 5},
     }
     s = Settings(raw=raw, config_path=tmp_path / "pipeline.yaml", root=tmp_path)
     VaultWriter(s.vault_dir).ensure_layout()
     s.prompts_dir.mkdir(parents=True, exist_ok=True)
     (s.prompts_dir / "extract_claims_v1.md").write_text("Extract claims. Return a JSON array.")
     (s.prompts_dir / "dedup_confirm_v1.md").write_text("Same claim? Return {\"same\": bool}.")
+    (s.prompts_dir / "entities_extract_v1.md").write_text("Extract entities. Return JSON {name,type}.")
+    (s.prompts_dir / "entities_confirm_v1.md").write_text("Same entity? Return {\"same\": bool}.")
     return s
 
 
@@ -68,6 +72,7 @@ def fake_claims(monkeypatch):
 
     holder = {
         "text": '[{"claim": "Taste is the differentiator.", "quote": "Taste is the differentiator."}]',
+        "entities": '[{"name": "OpenAI", "type": "company"}]',
         "same": False,
         "vector": None,
     }
@@ -77,8 +82,13 @@ def fake_claims(monkeypatch):
         supports_batch = False
 
         def complete(self, messages, model, params):
-            is_confirm = "same" in messages[0].content.lower()
-            text = ('{"same": true}' if holder["same"] else '{"same": false}') if is_confirm else holder["text"]
+            system = messages[0].content.lower()
+            if "same" in system:  # a confirm/tiebreak call (dedup or entities)
+                text = '{"same": true}' if holder["same"] else '{"same": false}'
+            elif "entit" in system:  # entity extraction
+                text = holder["entities"]
+            else:  # claim extraction
+                text = holder["text"]
             return Completion(text=text, provider="fake", model=model, tokens_in=11, tokens_out=7, usd=0.0001, latency_ms=42)
 
         def embed(self, texts, model):
