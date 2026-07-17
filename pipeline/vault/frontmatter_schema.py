@@ -87,10 +87,12 @@ def claim_note(
     prompt_version: str | None = None,
     source_url: str | None = None,
     attribution_mode: str | None = None,
+    attestations: list[dict] | None = None,
 ) -> dict:
     # An atomic derived claim (plan §6.2), carrying its full generating key so it
-    # is reproducible and promotable without recompute.
-    return base(
+    # is reproducible and promotable without recompute. `attestations` are the
+    # corroborating sources (plan §6.3), seeded with the originating source.
+    fm = base(
         note_type="claim",
         authority="derived",
         source_hash=source_hash,
@@ -102,6 +104,8 @@ def claim_note(
         model=model,
         params=params,
     )
+    fm["attestations"] = list(attestations) if attestations else []
+    return fm
 
 
 def commentary_note(*, source_hash: str, pipeline_version: str, source_url: str | None = None) -> dict:
