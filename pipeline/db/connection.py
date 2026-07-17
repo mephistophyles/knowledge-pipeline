@@ -24,8 +24,22 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
 
 def bootstrap(db_path: str | Path) -> sqlite3.Connection:
-    """Create the DB file + tables if absent, return a connection."""
+    """Create the DB file + tables if absent, apply column migrations, connect."""
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = connect(db_path)
     conn.executescript(_SCHEMA.read_text())
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive column migrations for DBs created before a schema change.
+
+    `CREATE TABLE IF NOT EXISTS` never alters an existing table, so new columns
+    on `costs` (provider, latency_ms) must be added explicitly for older DBs.
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(costs)")}
+    if "provider" not in cols:
+        conn.execute("ALTER TABLE costs ADD COLUMN provider TEXT")
+    if "latency_ms" not in cols:
+        conn.execute("ALTER TABLE costs ADD COLUMN latency_ms INTEGER")

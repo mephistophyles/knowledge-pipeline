@@ -1,5 +1,5 @@
-"""Cost ledger writes (plan §3). LLM stages call `record` in build step 5;
-present now so the schema contract is stable."""
+"""Cost ledger writes (plan §3). Every provider call records one row — the
+substrate for benchmarking quality/cost/latency per step across models."""
 from __future__ import annotations
 
 import sqlite3
@@ -13,9 +13,11 @@ def record(
     tokens_in: int,
     tokens_out: int,
     usd: float,
+    provider: str | None = None,
+    latency_ms: int | None = None,
 ) -> None:
     conn.execute(
-        "INSERT INTO costs(artifact_hash, stage, model, tokens_in, tokens_out, usd) "
-        "VALUES(?,?,?,?,?,?)",
-        (artifact_hash, stage, model, tokens_in, tokens_out, usd),
+        "INSERT INTO costs(artifact_hash, stage, provider, model, tokens_in, tokens_out, usd, latency_ms) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        (artifact_hash, stage, provider, model, tokens_in, tokens_out, usd, latency_ms),
     )
