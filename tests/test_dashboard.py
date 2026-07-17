@@ -3,8 +3,19 @@ smoke. Helpers take a connection so they test without the Settings/disk plumbing
 from fastapi.testclient import TestClient
 
 from dashboard import app as dash
+from pipeline.db import registry
 from pipeline.ingestors.paste import add_paste
 from pipeline.orchestrator.executor import run_stage
+
+
+def _ctx(conn, filters=None, page=1):
+    filters = filters or {}
+    return {
+        "counts": dash.status_counts(conn), "matrix": dash.stage_matrix(conn),
+        "costs": dash.cost_summary(conn), "arts": dash.artifacts(conn, filters=filters, page=page),
+        "facets": registry.facet_values(conn), "filters": filters, "page": page,
+        "total": registry.count(conn, filters=filters), "unregistered": registry.unregistered_count(conn),
+    }
 
 
 def test_health():
@@ -46,9 +57,19 @@ def test_artifact_detail_is_chain_ordered(settings, conn):
 
 
 def test_render_overview_smoke(settings, conn):
-    h = add_paste(settings, conn, "x")
-    run_stage(settings, conn, h, "source_note")
-    out = dash._render_overview(
-        dash.status_counts(conn), dash.stage_matrix(conn), dash.cost_summary(conn), dash.artifacts(conn)
-    )
-    assert h[:12] in out and "extract_claims" in out
+    add_paste(settings, conn, "hello world backlog item", source_url="https://p")
+    out = dash._render_overview(_ctx(conn))
+    assert "hello world backlog item" in out  # title shown, not the hash
+    assert "filter" in out                     # filter bar present
+
+
+def test_artifacts_filter_by_facet(settings, conn):
+    add_paste(settings, conn, "a paste item", source_url="https://a")  # registers source_type=paste
+    registry.register(conn, "email1", source_type="email", author="Ann", title="Newsletter #1")
+
+    emails = dash.artifacts(conn, filters={"source_type": "email"})
+    assert [a["artifact_hash"] for a in emails] == ["email1"]
+    assert emails[0]["title"] == "Newsletter #1"
+
+    pastes = dash.artifacts(conn, filters={"source_type": "paste"})
+    assert all(a["source_type"] == "paste" for a in pastes) and len(pastes) == 1
