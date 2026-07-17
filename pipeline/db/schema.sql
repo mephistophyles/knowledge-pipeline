@@ -38,10 +38,12 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS costs (
   artifact_hash TEXT,
   stage         TEXT,
+  provider      TEXT,                              -- which provider served the call
   model         TEXT,
   tokens_in     INTEGER,
   tokens_out    INTEGER,
   usd           REAL,
+  latency_ms    INTEGER,                           -- wall-clock of the provider call
   at            TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_costs_stage ON costs(stage);

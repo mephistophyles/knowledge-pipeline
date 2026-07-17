@@ -21,6 +21,17 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+@dataclass(frozen=True)
+class StageModel:
+    """Resolved per-stage LLM config: which provider, model, params, prompt."""
+
+    provider: str
+    model: str
+    params: dict[str, Any]
+    prompt_version: str
+    batch: bool
+
+
 @dataclass
 class Settings:
     raw: dict[str, Any]
@@ -55,6 +66,28 @@ class Settings:
     @property
     def vault_dir(self) -> Path:
         return self._path("vault")
+
+    @property
+    def prompts_dir(self) -> Path:
+        # Prompts live beside the config file, at config/prompts/.
+        return self.config_path.parent / "prompts"
+
+    @property
+    def providers_config(self) -> dict[str, Any]:
+        return self.raw.get("providers", {}) or {}
+
+    def stage_model(self, stage: str) -> "StageModel":
+        """Resolve the {provider, model, params, prompt_version} for one stage."""
+        m = (self.raw.get("models", {}) or {}).get(stage)
+        if not m:
+            raise KeyError(f"no `models:` entry for stage {stage!r} in {self.config_path}")
+        return StageModel(
+            provider=m["provider"],
+            model=m["model"],
+            params=dict(m.get("params") or {}),
+            prompt_version=str(m.get("prompt_version", "v1")),
+            batch=bool(m.get("batch", False)),
+        )
 
     @property
     def poll_interval(self) -> float:

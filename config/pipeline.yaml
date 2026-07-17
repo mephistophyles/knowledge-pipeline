@@ -16,14 +16,46 @@ storage:
     prefix: raw
     region: us-east-1
 
-# task → model registry (swap point). Consumed by the derivation stages in build step 5.
-# Present now so the registry shape is stable; steps 1–2 make no LLM calls.
+# Providers — declared once, referenced by the per-stage `models` map below.
+# All three speak the OpenAI-compatible API, so one adapter serves them; they
+# differ only in base_url / key / model-ids. `pricing` (USD per 1M tokens) feeds
+# the cost ledger — omit it (Ollama, local) and cost is recorded as 0.
+providers:
+  openai:
+    type: openai_compat
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    supports_batch: true          # OpenAI Batch API (50% off) — execution is a later PR
+    pricing:
+      gpt-4o-mini: {in: 0.15, out: 0.60}
+      gpt-4o:      {in: 2.50, out: 10.00}
+  openrouter:
+    type: openai_compat
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    # no batch discount → runs bounded-concurrency async (later PR)
+  ollama:
+    type: openai_compat
+    base_url: http://localhost:11434/v1
+    api_key_env: null             # keyless, local, cost 0
+
+# Per-stage swap point (plan §6.5): each derivation stage independently picks a
+# provider + model + params + prompt_version. Swap a line here to eval a different
+# model/provider for that step; the generating key rides into the note frontmatter.
 models:
-  extract_claims:  {model: claude-haiku-4-5,  batch: true}
-  dedup_confirm:   {model: claude-haiku-4-5,  batch: true}
-  speaker_map:     {model: claude-haiku-4-5,  batch: true}
-  structure_notes: {model: claude-sonnet-4-6, batch: true}
-  synthesize_hub:  {model: claude-sonnet-4-6, batch: false}
+  extract_claims:
+    provider: openai
+    model: gpt-4o-mini
+    params: {temperature: 0, max_tokens: 2048}
+    prompt_version: v1
+    batch: false
+  # dedup materializes candidate claims into notes (no LLM yet); real embedding +
+  # attestation dedup will add a model entry here. entities is still a stub.
+  #
+  # Offline / free alternative for any stage — flip provider+model to Ollama:
+  #   provider: ollama
+  #   model: gemma4:latest
+  #   params: {temperature: 0}
 
 embeddings:
   dedup: {model: nomic-embed-text-v1.5, local: true}   # write-time dedup, build step 5

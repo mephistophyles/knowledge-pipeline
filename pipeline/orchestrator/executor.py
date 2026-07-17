@@ -36,7 +36,7 @@ def run_stage(
         raise ValueError(f"no job {artifact_hash[:12]}/{stage}")
     source_type = job["source_type"]
 
-    ctx = StageContext.build(settings, artifact_hash, stage, job["input_path"])
+    ctx = StageContext.build(settings, conn, artifact_hash, stage, job["input_path"])
     handler = get_handler(stage)
     output_path = handler(ctx)  # writes intermediate before we touch job state
 
