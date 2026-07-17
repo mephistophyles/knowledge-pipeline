@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 
-from pipeline.llm.base import Completion, LLMError, Message
+from pipeline.llm.base import Completion, Embeddings, LLMError, Message
 
 
 class OpenAICompatProvider:
@@ -55,9 +55,29 @@ class OpenAICompatProvider:
             latency_ms=latency_ms,
         )
 
+    def embed(self, texts: list[str], model: str) -> Embeddings:
+        t0 = time.monotonic()
+        try:
+            resp = self._client.embeddings.create(model=model, input=texts)
+        except Exception as e:
+            raise LLMError(f"{self.name}/{model} (embed): {e}") from e
+        latency_ms = int((time.monotonic() - t0) * 1000)
+
+        vectors = [list(d.embedding) for d in resp.data]
+        usage = getattr(resp, "usage", None)
+        tokens = int(getattr(usage, "prompt_tokens", 0) or getattr(usage, "total_tokens", 0) or 0)
+        return Embeddings(
+            vectors=vectors,
+            provider=self.name,
+            model=model,
+            tokens=tokens,
+            usd=self._cost(model, tokens, 0),  # embeddings priced on input only
+            latency_ms=latency_ms,
+        )
+
     def _cost(self, model: str, tokens_in: int, tokens_out: int) -> float:
         """USD from the configured price map (per 1M tokens); 0 when unpriced."""
         price = self._pricing.get(model)
         if not price:
             return 0.0
-        return tokens_in / 1_000_000 * price["in"] + tokens_out / 1_000_000 * price["out"]
+        return tokens_in / 1_000_000 * price["in"] + tokens_out / 1_000_000 * price.get("out", 0.0)
