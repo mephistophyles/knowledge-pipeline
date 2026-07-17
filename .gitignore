@@ -13,5 +13,13 @@ __pycache__/
 # Env / secrets
 .env
 
+# Terraform — state can contain secrets; tfvars is per-environment. Never commit.
+# (.terraform.lock.hcl IS committed — it pins provider versions.)
+infra/.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.auto.tfvars
+
 # OS
 .DS_Store

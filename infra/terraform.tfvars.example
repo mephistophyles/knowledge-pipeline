@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored (it's your
+# environment, not shared config).
+
+# GLOBALLY unique across all of AWS — pick something with your name in it.
+raw_bucket_name = "madebyphil-knowledge-pipeline"
+
+# Your public IP as a /32, locks SSH to you. Get it: curl ifconfig.me
+my_ip_cidr = "CHANGE.ME.TO.YOUR.IP/32"
+
+# Optional overrides (defaults shown):
+# region              = "us-east-1"
+# domain              = "madebyphil.com"
+# subdomain           = "pipeline"
+# instance_type       = "t3.small"
+# root_volume_gb      = 40
+# ssh_public_key_path = "~/.ssh/knowledge-pipeline.pub"
