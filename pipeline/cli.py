@@ -27,6 +27,8 @@ from pipeline.vault import VaultWriter
 app = typer.Typer(help="Personal knowledge pipeline — control plane + ingestion.", no_args_is_help=True)
 add_app = typer.Typer(help="Ingest a new artifact into the raw store.", no_args_is_help=True)
 app.add_typer(add_app, name="add")
+eval_app = typer.Typer(help="Eval-compare a stage across model/provider variants.", no_args_is_help=True)
+app.add_typer(eval_app, name="eval")
 
 
 def _settings() -> Settings:
@@ -222,6 +224,48 @@ def retry(
             (h,),
         )
     typer.secho(f"requeued {h[:12]} ({cur.rowcount} stage row(s))", fg="green")
+
+
+# ── eval-compare ──────────────────────────────────────────────────────────────
+@eval_app.command("run")
+def eval_run(
+    ref: str = typer.Argument(...),
+    stage: str = typer.Argument(..., help="Producer stage to eval (e.g. extract_claims)."),
+) -> None:
+    """Run a stage under every configured variant, hold the artifact, print a report."""
+    from pipeline import eval_compare
+
+    settings = _settings()
+    conn = _conn(settings)
+    h = _resolve(conn, ref)
+    try:
+        manifest = eval_compare.run_eval(settings, conn, h, stage)
+    except ValueError as e:
+        typer.secho(f"error: {e}", fg="red", err=True)
+        raise typer.Exit(1)
+    typer.echo(eval_compare.render_report(manifest))
+    typer.secho(f"artifact held for review — approve with: pipeline eval approve {h[:12]} {stage} <#>", fg="yellow")
+
+
+@eval_app.command("approve")
+def eval_approve(
+    ref: str = typer.Argument(...),
+    stage: str = typer.Argument(...),
+    index: int = typer.Argument(..., help="Variant number from the eval report."),
+) -> None:
+    """Commit the chosen variant's output and resume the chain."""
+    from pipeline import eval_compare
+
+    settings = _settings()
+    conn = _conn(settings)
+    h = _resolve(conn, ref)
+    try:
+        result = eval_compare.approve_eval(settings, conn, h, stage, index)
+    except ValueError as e:
+        typer.secho(f"error: {e}", fg="red", err=True)
+        raise typer.Exit(1)
+    typer.secho(f"approved variant {index} for {h[:12]}/{stage}", fg="green")
+    typer.echo(f"  next stage: {result['next_stage'] or '∅ (chain complete)'}")
 
 
 # ── hand-walk / single-step ───────────────────────────────────────────────────
