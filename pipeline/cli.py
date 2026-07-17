@@ -27,6 +27,8 @@ from pipeline.vault import VaultWriter
 app = typer.Typer(help="Personal knowledge pipeline — control plane + ingestion.", no_args_is_help=True)
 add_app = typer.Typer(help="Ingest a new artifact into the raw store.", no_args_is_help=True)
 app.add_typer(add_app, name="add")
+ingest_app = typer.Typer(help="Bulk / feed ingestion (email, …).", no_args_is_help=True)
+app.add_typer(ingest_app, name="ingest")
 eval_app = typer.Typer(help="Eval-compare a stage across model/provider variants.", no_args_is_help=True)
 app.add_typer(eval_app, name="eval")
 
@@ -105,6 +107,25 @@ def annotate(
     VaultWriter(settings.vault_dir).ensure_layout()
     h = _annotate(settings, conn, ref, content, source_url=url)
     typer.secho(f"annotated → personal_note {h[:12]}", fg="green")
+
+
+@ingest_app.command("email")
+def ingest_email(
+    label: str = typer.Option(..., "--label", help="Gmail label / IMAP folder to pull from."),
+    limit: int = typer.Option(50, "--limit", help="Max messages to fetch (newest first)."),
+) -> None:
+    """Read-only IMAP pull of a label's emails → one clean-markdown artifact each."""
+    from pipeline.ingestors.email import fetch_and_ingest
+
+    settings = _settings()
+    conn = _conn(settings)
+    VaultWriter(settings.vault_dir).ensure_layout()
+    try:
+        hashes = fetch_and_ingest(settings, conn, label=label, limit=limit)
+    except RuntimeError as e:
+        typer.secho(f"error: {e}", fg="red", err=True)
+        raise typer.Exit(1)
+    typer.secho(f"ingested {len(hashes)} email(s) from {label!r}", fg="green")
 
 
 # ── workers / scheduler ───────────────────────────────────────────────────────
