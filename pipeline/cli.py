@@ -29,6 +29,8 @@ add_app = typer.Typer(help="Ingest a new artifact into the raw store.", no_args_
 app.add_typer(add_app, name="add")
 eval_app = typer.Typer(help="Eval-compare a stage across model/provider variants.", no_args_is_help=True)
 app.add_typer(eval_app, name="eval")
+registry_app = typer.Typer(help="Artifact registry (dashboard backlog metadata).", no_args_is_help=True)
+app.add_typer(registry_app, name="registry")
 
 
 def _settings() -> Settings:
@@ -105,6 +107,17 @@ def annotate(
     VaultWriter(settings.vault_dir).ensure_layout()
     h = _annotate(settings, conn, ref, content, source_url=url)
     typer.secho(f"annotated → personal_note {h[:12]}", fg="green")
+
+
+@registry_app.command("backfill")
+def registry_backfill() -> None:
+    """Register any artifacts ingested before the registry existed (from manifests)."""
+    from pipeline.db import registry
+
+    settings = _settings()
+    conn = _conn(settings)
+    n = registry.backfill(settings, conn)
+    typer.secho(f"registered {n} artifact(s)", fg="green")
 
 
 # ── workers / scheduler ───────────────────────────────────────────────────────
