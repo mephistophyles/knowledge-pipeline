@@ -20,7 +20,18 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA synchronous=NORMAL")
+    _load_vec(conn)
     return conn
+
+
+def _load_vec(conn: sqlite3.Connection) -> None:
+    """Load the sqlite-vec extension so vector tables (claim dedup) are available
+    on every connection. Extension loading is re-disabled immediately after."""
+    import sqlite_vec
+
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
 
 
 def bootstrap(db_path: str | Path) -> sqlite3.Connection:
