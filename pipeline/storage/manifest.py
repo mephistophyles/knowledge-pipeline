@@ -32,6 +32,7 @@ class Manifest:
     ingestor_version: str
     ext: str                       # artifact file extension, so the blob can be reloaded
     annotates: str | None = None
+    extra: dict | None = None       # source-specific metadata (e.g. email headers)
 
     def to_json(self) -> bytes:
         return json.dumps(asdict(self), indent=2, sort_keys=True).encode()
@@ -50,6 +51,7 @@ def write_artifact(
     ext: str,
     source_url: str | None = None,
     annotates: str | None = None,
+    extra: dict | None = None,
 ) -> tuple[str, Manifest]:
     """Hash → write blob + manifest.json → return (hash, manifest).
 
@@ -64,6 +66,7 @@ def write_artifact(
         ingestor_version=ingestor_version,
         ext=ext,
         annotates=annotates,
+        extra=extra,
     )
     store.write(raw_key(h, f"artifact.{ext}"), data)
     store.write(raw_key(h, "manifest.json"), manifest.to_json())
