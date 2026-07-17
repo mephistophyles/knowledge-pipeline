@@ -10,6 +10,11 @@ import time
 from typing import Optional
 
 import typer
+from dotenv import load_dotenv
+
+# Local dev reads provider keys (OPENAI_API_KEY, …) from .env; on the box they
+# come from the environment (SSM-injected), where this is a harmless no-op.
+load_dotenv()
 
 from pipeline.config import Settings
 from pipeline.db import bootstrap, connect
