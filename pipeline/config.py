@@ -76,6 +76,15 @@ class Settings:
     def providers_config(self) -> dict[str, Any]:
         return self.raw.get("providers", {}) or {}
 
+    @property
+    def embeddings_config(self) -> dict[str, Any]:
+        return self.raw.get("embeddings", {}) or {}
+
+    @property
+    def dedup_config(self) -> dict[str, Any]:
+        cfg = self.raw.get("dedup", {}) or {}
+        return {"max_distance": float(cfg.get("max_distance", 0.6)), "shortlist_k": int(cfg.get("shortlist_k", 5))}
+
     def stage_model(self, stage: str) -> "StageModel":
         """Resolve the {provider, model, params, prompt_version} for one stage."""
         m = (self.raw.get("models", {}) or {}).get(stage)
