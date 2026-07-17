@@ -15,16 +15,19 @@ eval-compare / offline / promote clean, plan invariant 3):
 from __future__ import annotations
 
 import json
+import math
 import re
+from datetime import date
 from pathlib import Path
 from typing import Callable
 
-from pipeline.db import costs
+from pipeline.db import claims_index, costs
 from pipeline.llm import Message, gen_key
 from pipeline.llm import prompts, registry
 from pipeline.orchestrator.context import StageContext
 from pipeline.storage.manifest import load_artifact
 from pipeline.vault import frontmatter_schema as fm
+from pipeline.vault.writer import read_note
 
 
 def _source_id(ctx: StageContext) -> str:
@@ -107,46 +110,129 @@ def extract_claims(ctx: StageContext) -> str:
 
 
 def dedup(ctx: StageContext) -> str:
-    """COMMITTER (minimal): write one claim note per candidate, carrying the
-    generating key. Real embedding + attestation dedup (plan §6.3) is a later PR.
+    """COMMITTER (plan §6.3): for each candidate, embed → shortlist nearest claims
+    → cheap-LLM confirm. On a match, append an attestation to the existing claim
+    note (rolling linkage); on a miss, create a new claim note and index it.
     """
     data = json.loads(Path(ctx.input_path).read_text()) if ctx.input_path else {}
     key = data.get("gen_key", {})
     candidates = data.get("claims", [])
     source_id = _source_id(ctx)
 
-    written: list[str] = []
-    for i, c in enumerate(candidates):
-        claim_text = (c.get("text") or "").strip()
-        if not claim_text:
-            continue
-        claim_id = f"claim-{ctx.artifact_hash[:8]}-{i:02d}"
-        metadata = fm.claim_note(
-            source_hash=ctx.artifact_hash,
-            pipeline_version=ctx.settings.pipeline_version,
-            provider=key.get("provider"),
-            model=key.get("model"),
-            params=key.get("params"),
-            prompt_version=key.get("prompt_version"),
-            source_url=ctx.manifest.source_url,
-        )
-        quote = (c.get("quote") or "").strip()
-        body = f"# {claim_text}\n\n"
-        if quote:
-            body += f"> {quote}\n\n"
-        body += f"---\nFrom source `{ctx.artifact_hash[:12]}` ({source_id}).\n"
-        ctx.vault.write_note(f"corpus/claims/{claim_id}.md", metadata, body)
-        written.append(claim_id)
+    emb_cfg = ctx.settings.embeddings_config
+    dcfg = ctx.settings.dedup_config
+    emb_provider = registry.get_provider(ctx.settings, emb_cfg["provider"])
+    confirm_mc = ctx.settings.stage_model("dedup")
+    confirm_provider = registry.get_provider(ctx.settings, confirm_mc.provider)
+    confirm_prompt = prompts.load_prompt(ctx.settings, "dedup_confirm", confirm_mc.prompt_version)
 
-    ctx.vault.commit(f"[claims] {source_id}: {len(written)} claim(s)")
+    new_ids: list[str] = []
+    attested: list[str] = []
+    for i, c in enumerate(candidates):
+        text = (c.get("text") or "").strip()
+        if not text:
+            continue
+        quote = (c.get("quote") or "").strip()
+
+        emb = emb_provider.embed([text], emb_cfg["model"])
+        costs.record(
+            ctx.conn, ctx.artifact_hash, "dedup:embed", emb.model, emb.tokens, 0, emb.usd,
+            provider=emb.provider, latency_ms=emb.latency_ms,
+        )
+        vec = _normalize(emb.vectors[0])
+
+        matched_id = None
+        for m in claims_index.nearest(ctx.conn, vec, dcfg["shortlist_k"]):
+            if m["distance"] > dcfg["max_distance"]:
+                break  # sorted ascending — nothing closer remains
+            verdict = confirm_provider.complete(
+                [Message("system", confirm_prompt), Message("user", f"A: {m['text']}\nB: {text}")],
+                confirm_mc.model, confirm_mc.params,
+            )
+            costs.record(
+                ctx.conn, ctx.artifact_hash, "dedup:confirm", verdict.model,
+                verdict.tokens_in, verdict.tokens_out, verdict.usd,
+                provider=verdict.provider, latency_ms=verdict.latency_ms,
+            )
+            if _parse_same(verdict.text):
+                matched_id = m["claim_id"]
+                break
+
+        if matched_id:
+            _append_attestation(ctx, matched_id, _attestation(ctx, quote, key.get("model")))
+            attested.append(matched_id)
+        else:
+            claim_id = f"claim-{ctx.artifact_hash[:8]}-{i:02d}"
+            att = _attestation(ctx, quote, key.get("model"))
+            metadata = fm.claim_note(
+                source_hash=ctx.artifact_hash,
+                pipeline_version=ctx.settings.pipeline_version,
+                provider=key.get("provider"),
+                model=key.get("model"),
+                params=key.get("params"),
+                prompt_version=key.get("prompt_version"),
+                source_url=ctx.manifest.source_url,
+                attestations=[att],
+            )
+            ctx.vault.write_note(f"corpus/claims/{claim_id}.md", metadata, _claim_body(text, [att]))
+            claims_index.add_claim(
+                ctx.conn, claim_id, ctx.artifact_hash, text, ctx.manifest.source_url, key.get("model"), vec
+            )
+            new_ids.append(claim_id)
+
+    ctx.vault.commit(f"[claims] {source_id}: +{len(new_ids)} new, {len(attested)} attested")
     return ctx.write_intermediate(
-        "dedup.json",
-        {
-            "written": written,
-            "count": len(written),
-            "note": "minimal materializer — embedding + attestation dedup is a later PR (plan §6.3)",
-        },
+        "dedup.json", {"new": new_ids, "attested": attested, "count": len(new_ids)}
     )
+
+
+# ── dedup helpers ─────────────────────────────────────────────────────────────
+def _normalize(vec: list[float]) -> list[float]:
+    n = math.sqrt(sum(x * x for x in vec)) or 1.0
+    return [x / n for x in vec]
+
+
+def _parse_same(text: str) -> bool:
+    obj = _extract_json(text)
+    if isinstance(obj, dict):
+        return bool(obj.get("same"))
+    return False  # conservative: unparseable verdict → distinct, never a bad merge
+
+
+def _attestation(ctx: StageContext, quote: str, model: str | None) -> dict:
+    return {
+        "source_hash": ctx.artifact_hash,
+        "source_url": ctx.manifest.source_url,
+        "date": date.today().isoformat(),
+        "model": model,
+        "quote": quote,
+    }
+
+
+def _attestation_line(a: dict) -> str:
+    return f"- `{a['source_hash'][:12]}` ({a.get('source_url') or '—'}) — \"{a.get('quote', '')}\" [{a.get('date', '')}]"
+
+
+def _claim_body(text: str, attestations: list[dict]) -> str:
+    body = f"# {text}\n\n## Attestations\n\n"
+    for a in attestations:
+        body += _attestation_line(a) + "\n"
+    return body
+
+
+def _append_attestation(ctx: StageContext, claim_id: str, attestation: dict) -> None:
+    relpath = f"corpus/claims/{claim_id}.md"
+    post = read_note(ctx.vault.root / relpath)
+    meta = dict(post.metadata)
+    meta["attestations"] = list(meta.get("attestations") or []) + [attestation]
+    content = post.content.rstrip()
+    line = _attestation_line(attestation)
+    if "## Attestations" in content:
+        content = f"{content}\n{line}\n"
+    else:
+        content = f"{content}\n\n## Attestations\n\n{line}\n"
+    ctx.vault.write_note(relpath, meta, content)
+    claims_index.bump_attestation(ctx.conn, claim_id)
 
 
 def personal(ctx: StageContext) -> str:

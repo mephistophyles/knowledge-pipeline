@@ -40,14 +40,31 @@ class Completion:
     raw: dict[str, Any] | None = None
 
 
+@dataclass
+class Embeddings:
+    vectors: list[list[float]]
+    provider: str
+    model: str
+    tokens: int
+    usd: float
+    latency_ms: int
+
+
 @runtime_checkable
 class Provider(Protocol):
-    """What every provider adapter must offer. Kept deliberately small."""
+    """What every provider adapter must offer. Kept deliberately small.
+
+    `embed` is optional in spirit — only stages that need vectors call it, and a
+    provider that can't embed simply raises. The OpenAI-compatible adapter serves
+    both completions and embeddings over the same endpoint family.
+    """
 
     name: str
     supports_batch: bool  # capability flag; batch *execution* is a later PR
 
     def complete(self, messages: list[Message], model: str, params: dict) -> Completion: ...
+
+    def embed(self, texts: list[str], model: str) -> Embeddings: ...
 
 
 def gen_key(

@@ -49,16 +49,31 @@ models:
     params: {temperature: 0, max_tokens: 2048}
     prompt_version: v1
     batch: false
-  # dedup materializes candidate claims into notes (no LLM yet); real embedding +
-  # attestation dedup will add a model entry here. entities is still a stub.
+  # The cheap model that confirms same-claim vs distinct during dedup (plan §6.3).
+  dedup:
+    provider: ollama
+    model: gemma4:latest
+    params: {temperature: 0}
+    prompt_version: v1
+  # entities is still a stub.
   #
   # Offline / free alternative for any stage — flip provider+model to Ollama:
   #   provider: ollama
   #   model: gemma4:latest
   #   params: {temperature: 0}
 
+# Write-time dedup embeddings (plan §6.3). Same provider layer as completions —
+# nomic-embed-text runs locally on Ollama (keyless, free).
 embeddings:
-  dedup: {model: nomic-embed-text-v1.5, local: true}   # write-time dedup, build step 5
+  provider: ollama
+  model: nomic-embed-text
+
+# Dedup tuning: a candidate matches an existing claim when its nearest neighbour's
+# L2 distance (unit-normalized embeddings) is below max_distance; the top-k
+# shortlist is then confirmed by the `models.dedup` model above.
+dedup:
+  max_distance: 0.6
+  shortlist_k: 5
 
 worker:
   poll_interval_seconds: 2.0

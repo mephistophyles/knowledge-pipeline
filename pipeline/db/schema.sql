@@ -47,3 +47,16 @@ CREATE TABLE IF NOT EXISTS costs (
   at            TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_costs_stage ON costs(stage);
+
+-- Claim index for dedup (plan §6.3). One row per committed claim note; the
+-- companion `claims_vec` (sqlite-vec virtual table) holds the embedding and is
+-- created lazily with the model's dimension the first time a claim is indexed.
+CREATE TABLE IF NOT EXISTS claims (
+  claim_id      TEXT PRIMARY KEY,
+  artifact_hash TEXT,                                -- source that first asserted it
+  text          TEXT,
+  source_url    TEXT,
+  model         TEXT,
+  attestations  INTEGER NOT NULL DEFAULT 1,          -- corroborating sources (incl. origin)
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+);
