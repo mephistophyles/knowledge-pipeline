@@ -20,18 +20,21 @@ source that repeats it.
   its provider + model + params. Every call logs tokens, **cost, and latency**.
 - **Real derivation chain** — `source_note` → `extract_claims` (LLM) → `dedup`
   (embed + sqlite-vec nearest + LLM confirm → attest-or-create) → `entities`
-  (stub). Claims that recur across sources collapse into one note with multiple
-  **attestations**.
+  (extract + resolve → link-or-create). Claims and entities that recur across
+  sources collapse into one note with multiple **attestations** / **mentions**.
+- **Eval-compare** — run a stage under several `{provider, model, params}`
+  variants over one source and compare outputs + cost + latency before approving
+  one into the vault (see [Common operations](#common-operations)).
 - **Git-backed vault** — frontmatter+markdown notes committed per batch; every
   derived note carries its full generating key.
 - **State machine** — resource-class workers with atomic (`BEGIN IMMEDIATE`)
   claiming, per-scope pause/hold/throttle, and hand-walk / single-step tools.
 - **Compose stack** — one `docker compose up` runs the tier-1 box locally.
 
-**Not yet built:** `entities` derivation (stub), eval-compare and promote
-workflows (designed — see [Planned workflows](#planned-workflows)), email/RSS/
-YouTube/web ingestors, the audio chain + GPU burst, and the dashboard control
-plane. AWS provisioning lives in [`infra/`](infra/) (Terraform).
+**Not yet built:** the promote workflow (designed — see
+[Planned workflows](#planned-workflows)), email/RSS/YouTube/web ingestors, the
+audio chain + GPU burst, claim↔entity linking, and the dashboard control plane.
+AWS provisioning lives in [`infra/`](infra/) (Terraform).
 
 ## How it works
 
@@ -143,6 +146,23 @@ The `models:` map in `config/pipeline.yaml` is the swap point — change a stage
 generating key, re-running a source under a new model produces a *new* keyed
 output rather than overwriting the old one.
 
+### Eval-compare a stage across models
+
+Benchmark a producer stage (e.g. `extract_claims`) across several
+`{provider, model, params}` variants over one source before committing anything.
+List the variants under `evals.<stage>` in `config/pipeline.yaml`, then:
+
+```bash
+uv run pipeline step <ref> source_note        # get extract_claims ready
+uv run pipeline eval run <ref> extract_claims # runs every variant; holds the artifact
+# → side-by-side report of outputs + tokens + cost + latency per variant
+uv run pipeline eval approve <ref> extract_claims 0   # commit variant 0; chain resumes
+```
+
+Each variant's output is a separate keyed intermediate (no vault write); approve
+picks the winner and the committer stages consume it. Only producer stages are
+eval-able.
+
 ### Inspect cost & latency
 
 Every LLM call writes to the `costs` table — the substrate for benchmarking
@@ -167,15 +187,6 @@ box; swap `docker/litestream.yml` to an S3 replica for the EC2 deployment.
 
 Designed against the produce/commit boundary above, **not yet implemented** —
 documented here as the intended UX and the spec for their slices.
-
-### Evals (eval-compare)
-
-Mark a source for evaluation and run a stage under two `{provider, model, params}`
-configs; both outputs are held (as separate keyed intermediates) for side-by-side
-comparison of quality, cost, and latency before you approve one into the vault.
-Your first real runs are effectively the baseline eval. *(Intermediates are
-already keyed by the generating key; the compare/approve control flow is the
-remaining work.)*
 
 ### Uploading a local run (promote)
 

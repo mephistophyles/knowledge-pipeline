@@ -87,6 +87,17 @@ entities:
   max_distance: 0.6
   shortlist_k: 5
 
+# Eval-compare variant sets (plan §6.5). `pipeline eval run <ref> extract_claims`
+# runs the stage under each variant below, holds the artifact, and writes a
+# side-by-side report of outputs + cost + latency; `pipeline eval approve <ref>
+# extract_claims <#>` commits the winner and resumes the chain. Only producer
+# stages are eval-able (they write no vault note). Edit these to whatever you
+# want to benchmark.
+evals:
+  extract_claims:
+    - {provider: openai, model: gpt-4o-mini, params: {temperature: 0}, prompt_version: v1}
+    - {provider: ollama, model: gemma4:latest, params: {temperature: 0}, prompt_version: v1}
+
 worker:
   poll_interval_seconds: 2.0
   max_attempts: 3

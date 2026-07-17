@@ -31,6 +31,12 @@ def settings(tmp_path):
         "embeddings": {"provider": "fake", "model": "fake-embed"},
         "dedup": {"max_distance": 0.6, "shortlist_k": 5},
         "entities": {"max_distance": 0.6, "shortlist_k": 5},
+        "evals": {
+            "extract_claims": [
+                {"provider": "fake", "model": "fake-A", "params": {}, "prompt_version": "v1"},
+                {"provider": "fake", "model": "fake-B", "params": {}, "prompt_version": "v1"},
+            ]
+        },
     }
     s = Settings(raw=raw, config_path=tmp_path / "pipeline.yaml", root=tmp_path)
     VaultWriter(s.vault_dir).ensure_layout()
