@@ -37,7 +37,7 @@ def test_control_precedence_most_specific_wins(conn):
 
 
 # ── claiming + advance ────────────────────────────────────────────────────────
-def test_paste_ingest_and_walk(settings, conn):
+def test_paste_ingest_and_walk(settings, conn, fake_claims):
     h = add_paste(settings, conn, "Taste is the differentiator.", source_url="https://x")
     assert jobs.get_job(conn, h, "source_note")["status"] == "ready"
 
