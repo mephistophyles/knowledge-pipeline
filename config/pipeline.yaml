@@ -87,6 +87,12 @@ entities:
   max_distance: 0.6
   shortlist_k: 5
 
+# Email ingestion (plan §4.1). IMAP, read-only, scoped by Gmail label. Credentials
+# come from IMAP_USER / IMAP_PASSWORD (a Gmail app password); only the host is here.
+#   pipeline ingest email --label "Newsletters/Author" --limit 50
+email:
+  host: imap.gmail.com
+
 # Eval-compare variant sets (plan §6.5). `pipeline eval run <ref> extract_claims`
 # runs the stage under each variant below, holds the artifact, and writes a
 # side-by-side report of outputs + cost + latency; `pipeline eval approve <ref>
