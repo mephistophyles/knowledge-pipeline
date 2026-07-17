@@ -54,6 +54,10 @@ def run_eval(settings: Settings, conn: sqlite3.Connection, artifact_hash: str, s
                     "prompt_version": variant.get("prompt_version", "v1"),
                     "intermediate": out,
                     "num_outputs": len(payload.get("claims") or []),
+                    "outputs": [
+                        {"text": c.get("text", ""), "quote": c.get("quote", "")}
+                        for c in (payload.get("claims") or [])
+                    ],
                     "tokens_in": usage.get("tokens_in"),
                     "tokens_out": usage.get("tokens_out"),
                     "usd": usage.get("usd"),
@@ -122,5 +126,13 @@ def render_report(manifest: dict) -> str:
         )
     lines += ["", "Approve one with: `pipeline eval approve <ref> " + stage + " <#>`", ""]
     for v in manifest["variants"]:
-        lines += [f"## [{v['index']}] {v.get('provider')}/{v.get('model')}", f"intermediate: `{v['intermediate']}`", ""]
+        lines += [f"## [{v['index']}] {v.get('provider')}/{v.get('model')}  ({v.get('num_outputs')} outputs, {v.get('latency_ms')}ms)"]
+        outputs = v.get("outputs") or []
+        if not outputs:
+            lines.append("_(no outputs — inspect the intermediate)_")
+        for j, o in enumerate(outputs, 1):
+            text = o.get("text", "") if isinstance(o, dict) else str(o)
+            quote = o.get("quote", "") if isinstance(o, dict) else ""
+            lines.append(f"{j}. {text}" + (f"\n   > {quote}" if quote else ""))
+        lines += [f"\nintermediate: `{v['intermediate']}`", ""]
     return "\n".join(lines)

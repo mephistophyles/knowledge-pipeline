@@ -51,6 +51,18 @@ def test_eval_approve_resumes_chain_from_chosen(settings, conn, fake_claims):
     assert result["next_stage"] == "dedup"
 
 
+def test_eval_report_inlines_actual_outputs(settings, conn, fake_claims):
+    fake_claims["text"] = '[{"claim": "Distribution beats product.", "quote": "distribution wins"}]'
+    h = _ready_extract(settings, conn)
+    manifest = eval_compare.run_eval(settings, conn, h, "extract_claims")
+
+    # Judge by outputs, not counts: the claim text (+ quote) is inlined in the report.
+    report = eval_compare.render_report(manifest)
+    assert "Distribution beats product." in report
+    assert "distribution wins" in report
+    assert manifest["variants"][0]["outputs"][0]["text"] == "Distribution beats product."
+
+
 def test_eval_rejects_committer_stage(settings, conn, fake_claims):
     h = _ready_extract(settings, conn)
     with pytest.raises(ValueError):
