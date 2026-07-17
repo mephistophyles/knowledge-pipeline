@@ -60,3 +60,14 @@ CREATE TABLE IF NOT EXISTS claims (
   attestations  INTEGER NOT NULL DEFAULT 1,          -- corroborating sources (incl. origin)
   created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Entity index for entity resolution (plan §6.4). Companion `entities_vec`
+-- (sqlite-vec) holds the embedding; string match keys on (name, entity_type).
+CREATE TABLE IF NOT EXISTS entities (
+  entity_id   TEXT PRIMARY KEY,
+  name        TEXT,
+  entity_type TEXT,
+  mentions    INTEGER NOT NULL DEFAULT 1,            -- sources that mention it (incl. origin)
+  created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name, entity_type);

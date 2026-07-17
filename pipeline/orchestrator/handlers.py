@@ -21,7 +21,7 @@ from datetime import date
 from pathlib import Path
 from typing import Callable
 
-from pipeline.db import claims_index, costs
+from pipeline.db import claims_index, costs, entities_index
 from pipeline.llm import Message, gen_key
 from pipeline.llm import prompts, registry
 from pipeline.orchestrator.context import StageContext
@@ -235,6 +235,160 @@ def _append_attestation(ctx: StageContext, claim_id: str, attestation: dict) -> 
     claims_index.bump_attestation(ctx.conn, claim_id)
 
 
+def entities(ctx: StageContext) -> str:
+    """Entity extraction + resolution (plan §6.4): pull named entities from the
+    source, resolve each against existing entities (exact (name,type) match →
+    embedding-nearest → LLM tiebreak), then link (add a mention) or create.
+    """
+    text = load_artifact(ctx.blobstore, ctx.manifest).decode("utf-8", errors="replace")
+    mc = ctx.settings.stage_model("entities")
+    provider = registry.get_provider(ctx.settings, mc.provider)
+    extract_prompt = prompts.load_prompt(ctx.settings, "entities_extract", mc.prompt_version)
+    confirm_prompt = prompts.load_prompt(ctx.settings, "entities_confirm", mc.prompt_version)
+
+    completion = provider.complete(
+        [Message("system", extract_prompt), Message("user", text)], mc.model, mc.params
+    )
+    costs.record(
+        ctx.conn, ctx.artifact_hash, "entities:extract", completion.model,
+        completion.tokens_in, completion.tokens_out, completion.usd,
+        provider=completion.provider, latency_ms=completion.latency_ms,
+    )
+    candidates = _parse_entities(completion.text)
+
+    emb_cfg = ctx.settings.embeddings_config
+    ecfg = ctx.settings.entities_config
+    emb_provider = registry.get_provider(ctx.settings, emb_cfg["provider"])
+
+    created: list[str] = []
+    linked: list[str] = []
+    for cand in candidates:
+        name, etype = cand["name"], cand["type"]
+
+        # 1. Exact (name, type) string match — cheap, no embed/LLM.
+        exact = entities_index.by_name(ctx.conn, name, etype)
+        if exact is not None:
+            _add_mention(ctx, exact["entity_id"])
+            linked.append(exact["entity_id"])
+            continue
+
+        # 2. Embedding nearest + LLM tiebreak.
+        emb = emb_provider.embed([f"{name} ({etype})"], emb_cfg["model"])
+        costs.record(
+            ctx.conn, ctx.artifact_hash, "entities:embed", emb.model, emb.tokens, 0, emb.usd,
+            provider=emb.provider, latency_ms=emb.latency_ms,
+        )
+        vec = _normalize(emb.vectors[0])
+
+        matched_id = None
+        for m in entities_index.nearest(ctx.conn, vec, ecfg["shortlist_k"]):
+            if m["distance"] > ecfg["max_distance"]:
+                break
+            verdict = provider.complete(
+                [Message("system", confirm_prompt),
+                 Message("user", f"A: {m['name']} ({m['entity_type']})\nB: {name} ({etype})")],
+                mc.model, mc.params,
+            )
+            costs.record(
+                ctx.conn, ctx.artifact_hash, "entities:confirm", verdict.model,
+                verdict.tokens_in, verdict.tokens_out, verdict.usd,
+                provider=verdict.provider, latency_ms=verdict.latency_ms,
+            )
+            if _parse_same(verdict.text):
+                matched_id = m["entity_id"]
+                break
+
+        if matched_id:
+            _add_mention(ctx, matched_id)
+            linked.append(matched_id)
+        else:
+            entity_id = _unique_entity_id(ctx.conn, name)
+            mention = _mention(ctx)
+            metadata = fm.entity_note(
+                name=name, entity_type=etype, source_hash=ctx.artifact_hash,
+                pipeline_version=ctx.settings.pipeline_version,
+                provider=completion.provider, model=mc.model, params=mc.params,
+                prompt_version=mc.prompt_version, source_url=ctx.manifest.source_url,
+                mentions=[mention],
+            )
+            ctx.vault.write_note(f"corpus/entities/{entity_id}.md", metadata, _entity_body(name, etype, [mention]))
+            entities_index.add_entity(ctx.conn, entity_id, name, etype, vec)
+            created.append(entity_id)
+
+    ctx.vault.commit(f"[entities] {_source_id(ctx)}: +{len(created)} new, {len(linked)} linked")
+    return ctx.write_intermediate(
+        "entities.json", {"created": created, "linked": linked, "count": len(created)}
+    )
+
+
+# ── entities helpers ──────────────────────────────────────────────────────────
+def _parse_entities(text: str) -> list[dict]:
+    raw = _extract_json(text)
+    if isinstance(raw, dict):
+        raw = raw.get("entities") or raw.get("items") or []
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for item in raw:
+        if isinstance(item, dict):
+            name = (item.get("name") or "").strip()
+            etype = (item.get("type") or item.get("entity_type") or "other").strip().lower()
+        elif isinstance(item, str):
+            name, etype = item.strip(), "other"
+        else:
+            continue
+        if not name:
+            continue
+        if etype not in fm.ENTITY_TYPES:
+            etype = "other"
+        out.append({"name": name, "type": etype})
+    return out
+
+
+def _slug(name: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return s or "entity"
+
+
+def _unique_entity_id(conn, name: str) -> str:
+    base = _slug(name)
+    eid, n = base, 2
+    while entities_index.get_entity(conn, eid) is not None:
+        eid, n = f"{base}-{n}", n + 1
+    return eid
+
+
+def _mention(ctx: StageContext) -> dict:
+    return {"source_hash": ctx.artifact_hash, "source_url": ctx.manifest.source_url, "date": date.today().isoformat()}
+
+
+def _mention_line(m: dict) -> str:
+    return f"- `{m['source_hash'][:12]}` ({m.get('source_url') or '—'}) [{m.get('date', '')}]"
+
+
+def _entity_body(name: str, entity_type: str, mentions: list[dict]) -> str:
+    body = f"# {name}\n\n*{entity_type}*\n\n## Mentions\n\n"
+    for m in mentions:
+        body += _mention_line(m) + "\n"
+    return body
+
+
+def _add_mention(ctx: StageContext, entity_id: str) -> None:
+    relpath = f"corpus/entities/{entity_id}.md"
+    post = read_note(ctx.vault.root / relpath)
+    meta = dict(post.metadata)
+    mention = _mention(ctx)
+    meta["mentions"] = list(meta.get("mentions") or []) + [mention]
+    content = post.content.rstrip()
+    line = _mention_line(mention)
+    if "## Mentions" in content:
+        content = f"{content}\n{line}\n"
+    else:
+        content = f"{content}\n\n## Mentions\n\n{line}\n"
+    ctx.vault.write_note(relpath, meta, content)
+    entities_index.bump_mention(ctx.conn, entity_id)
+
+
 def personal(ctx: StageContext) -> str:
     """Verbatim personal deriver (plan §4.7 default path): your words, no LLM."""
     text = load_artifact(ctx.blobstore, ctx.manifest).decode("utf-8", errors="replace")
@@ -252,19 +406,6 @@ def personal(ctx: StageContext) -> str:
     ctx.vault.write_note(f"personal/commentary/{note_id}.md", metadata, body)
     ctx.vault.commit(f"[personal] {note_id}")
     return ctx.write_intermediate("personal.json", {"note_id": note_id, "annotates": target})
-
-
-def _stub(stage: str) -> Callable[[StageContext], str]:
-    def handler(ctx: StageContext) -> str:
-        payload = {
-            "stage": stage,
-            "status": "stub",
-            "note": f"{stage} deriver is a build-step-5 stub; no LLM call made.",
-            "artifact_hash": ctx.artifact_hash,
-        }
-        return ctx.write_intermediate(f"{stage}.json", payload)
-
-    return handler
 
 
 def _parse_claims(text: str) -> list[dict]:
@@ -318,7 +459,7 @@ HANDLERS: dict[str, Callable[[StageContext], str]] = {
     "source_note": source_note,
     "extract_claims": extract_claims,
     "dedup": dedup,
-    "entities": _stub("entities"),
+    "entities": entities,
     "personal": personal,
 }
 

@@ -55,7 +55,13 @@ models:
     model: gemma4:latest
     params: {temperature: 0}
     prompt_version: v1
-  # entities is still a stub.
+  # Entity extraction + same-entity tiebreak (plan §6.4). One model, two prompts
+  # (entities_extract / entities_confirm), both at this prompt_version.
+  entities:
+    provider: ollama
+    model: gemma4:latest
+    params: {temperature: 0}
+    prompt_version: v1
   #
   # Offline / free alternative for any stage — flip provider+model to Ollama:
   #   provider: ollama
@@ -72,6 +78,12 @@ embeddings:
 # L2 distance (unit-normalized embeddings) is below max_distance; the top-k
 # shortlist is then confirmed by the `models.dedup` model above.
 dedup:
+  max_distance: 0.6
+  shortlist_k: 5
+
+# Entity resolution tuning (plan §6.4): after an exact (name, entity_type) string
+# match, near matches within max_distance are confirmed by the entities model.
+entities:
   max_distance: 0.6
   shortlist_k: 5
 

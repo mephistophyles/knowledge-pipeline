@@ -10,6 +10,7 @@ from datetime import date
 # Closed vocabularies — validated on write so a typo can't silently split a type.
 NOTE_TYPES = {"source", "claim", "entity", "hub", "relation", "commentary"}
 AUTHORITIES = {"derived", "personal"}
+ENTITY_TYPES = {"person", "tool", "company", "show", "other"}
 
 
 def _today() -> str:
@@ -105,6 +106,40 @@ def claim_note(
         params=params,
     )
     fm["attestations"] = list(attestations) if attestations else []
+    return fm
+
+
+def entity_note(
+    *,
+    name: str,
+    entity_type: str,
+    source_hash: str,
+    pipeline_version: str,
+    provider: str | None = None,
+    model: str | None = None,
+    params: dict | None = None,
+    prompt_version: str | None = None,
+    source_url: str | None = None,
+    mentions: list[dict] | None = None,
+) -> dict:
+    # A resolved entity (plan §6.4). `mentions` are the sources that reference it,
+    # seeded with the originating source.
+    if entity_type not in ENTITY_TYPES:
+        entity_type = "other"
+    fm = base(
+        note_type="entity",
+        authority="derived",
+        source_hash=source_hash,
+        pipeline_version=pipeline_version,
+        source_url=source_url,
+        prompt_version=prompt_version,
+        provider=provider,
+        model=model,
+        params=params,
+    )
+    fm["name"] = name
+    fm["entity_type"] = entity_type
+    fm["mentions"] = list(mentions) if mentions else []
     return fm
 
 

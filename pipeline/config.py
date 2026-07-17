@@ -82,7 +82,14 @@ class Settings:
 
     @property
     def dedup_config(self) -> dict[str, Any]:
-        cfg = self.raw.get("dedup", {}) or {}
+        return self._resolution_config("dedup")
+
+    @property
+    def entities_config(self) -> dict[str, Any]:
+        return self._resolution_config("entities")
+
+    def _resolution_config(self, key: str) -> dict[str, Any]:
+        cfg = self.raw.get(key, {}) or {}
         return {"max_distance": float(cfg.get("max_distance", 0.6)), "shortlist_k": int(cfg.get("shortlist_k", 5))}
 
     def stage_model(self, stage: str) -> "StageModel":
