@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 
 from pipeline.config import Settings
-from pipeline.db import jobs
+from pipeline.db import jobs, registry
 from pipeline.orchestrator import stages
 from pipeline.storage.manifest import write_artifact
 
@@ -42,4 +42,8 @@ def annotate(
         annotates=target_hash,
     )
     jobs.insert_job(conn, h, stages.first_stage(PERSONAL_TYPE), PERSONAL_TYPE)
+    registry.register(
+        conn, h, source_type=PERSONAL_TYPE, source=source_url, media="text",
+        title=f"notes on {target_hash[:12]}",
+    )
     return h

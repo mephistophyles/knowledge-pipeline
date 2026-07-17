@@ -71,3 +71,20 @@ CREATE TABLE IF NOT EXISTS entities (
   created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name, entity_type);
+
+-- Artifact registry (dashboard backlog browsing). One row per ingested artifact,
+-- populated at ingest, so thousands of items can be filtered by facet without
+-- reading every manifest. `jobs` holds progress; this holds what a thing IS.
+CREATE TABLE IF NOT EXISTS artifacts (
+  artifact_hash TEXT PRIMARY KEY,
+  source_type   TEXT,                                -- email | paste | personal_note | …
+  author        TEXT,                                -- writer / sender / host
+  source        TEXT,                                -- feed / publication / provenance URL
+  media         TEXT,                                -- text | audio | video
+  title         TEXT,                                -- subject / post / episode title
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_artifacts_source_type ON artifacts(source_type);
+CREATE INDEX IF NOT EXISTS idx_artifacts_author ON artifacts(author);
+CREATE INDEX IF NOT EXISTS idx_artifacts_source ON artifacts(source);
+CREATE INDEX IF NOT EXISTS idx_artifacts_media ON artifacts(media);

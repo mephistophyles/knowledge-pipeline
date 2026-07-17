@@ -9,7 +9,7 @@ from __future__ import annotations
 import sqlite3
 
 from pipeline.config import Settings
-from pipeline.db import jobs
+from pipeline.db import jobs, registry
 from pipeline.orchestrator import stages
 from pipeline.storage.manifest import write_artifact
 
@@ -34,4 +34,10 @@ def add_paste(
         source_url=source_url,
     )
     jobs.insert_job(conn, h, stages.first_stage(source_type), source_type)
+    first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), None)
+    title = first_line or source_url
+    registry.register(
+        conn, h, source_type=source_type, source=source_url, media="text",
+        title=title[:120] if title else None,
+    )
     return h

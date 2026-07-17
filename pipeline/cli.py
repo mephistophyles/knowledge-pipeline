@@ -31,6 +31,8 @@ ingest_app = typer.Typer(help="Bulk / feed ingestion (email, …).", no_args_is_
 app.add_typer(ingest_app, name="ingest")
 eval_app = typer.Typer(help="Eval-compare a stage across model/provider variants.", no_args_is_help=True)
 app.add_typer(eval_app, name="eval")
+registry_app = typer.Typer(help="Artifact registry (dashboard backlog metadata).", no_args_is_help=True)
+app.add_typer(registry_app, name="registry")
 
 
 def _settings() -> Settings:
