@@ -81,6 +81,10 @@ class Settings:
         return self.raw.get("embeddings", {}) or {}
 
     @property
+    def email_config(self) -> dict[str, Any]:
+        return self.raw.get("email", {}) or {}
+
+    @property
     def dedup_config(self) -> dict[str, Any]:
         return self._resolution_config("dedup")
 
