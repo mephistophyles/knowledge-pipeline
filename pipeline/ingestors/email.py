@@ -12,11 +12,23 @@ with fake messages; `fetch_and_ingest` does the live pull.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 
 from pipeline.config import Settings
-from pipeline.db import jobs
+from pipeline.db import jobs, registry
 from pipeline.orchestrator import stages
+
+# Newsletter boilerplate the extraction passes through (seen on real Substack mail):
+# a "view on the web" header (whose URL is the canonical article link) and bracketed
+# tracking-redirect URLs wrapping every link. Strip both; keep the canonical URL.
+_VIEW_ON_WEB = re.compile(r"(?im)^.*view this (?:post|email) (?:on the web|in your browser).*$")
+_CANONICAL = re.compile(r"view this (?:post|email) on the web at\s+(\S+)", re.I)
+_REDIRECT = re.compile(
+    r"\s*\[\s*https?://[^\]]*?(?:/redirect/|redirect\?|/CL0/|list-manage|click\.|/track|utm_)[^\]]*\]",
+    re.I,
+)
+_UNSUB = re.compile(r"(?im)^.*(unsubscribe|manage your subscription|update your preferences|©\s*\d{4}).*$")
 from pipeline.storage.manifest import write_artifact
 
 INGESTOR_VERSION = "email/0.1.0"
@@ -56,22 +68,47 @@ def _meta(msg) -> dict:
     }
 
 
+def _normalize(text: str) -> tuple[str, str | None]:
+    """Strip newsletter boilerplate; return (clean_text, canonical_article_url)."""
+    m = _CANONICAL.search(text)
+    canonical = m.group(1) if m else None
+    text = _VIEW_ON_WEB.sub("", text)
+    text = _REDIRECT.sub("", text)
+    text = _UNSUB.sub("", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip(), canonical
+
+
 def ingest_message(settings: Settings, conn: sqlite3.Connection, msg) -> str | None:
     """Ingest one message object → artifact + first job. Returns hash, or None if empty."""
-    text = _clean_text(msg)
+    raw = _clean_text(msg)
+    if not raw:
+        return None
+    text, canonical = _normalize(raw)
     if not text:
         return None
     meta = _meta(msg)
+    meta["canonical_url"] = canonical
+    meta["word_count"] = len(text.split())
     h, _ = write_artifact(
         settings.blobstore,
         text.encode("utf-8"),
         source_type="email",
         ingestor_version=INGESTOR_VERSION,
         ext="md",
-        source_url=meta.get("message_id"),
+        source_url=canonical or meta.get("message_id"),  # prefer the real article link
         extra=meta,
     )
     jobs.insert_job(conn, h, stages.first_stage("email"), "email")
+    registry.register(
+        conn, h, source_type="email",
+        author=meta.get("from"),
+        source=meta.get("list_id") or meta.get("from"),  # the newsletter feed
+        media="text",
+        title=meta.get("subject"),
+        word_count=meta["word_count"],
+    )
     return h
 
 

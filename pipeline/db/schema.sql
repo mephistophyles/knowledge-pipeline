@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
   source        TEXT,                                -- feed / publication / provenance URL
   media         TEXT,                                -- text | audio | video
   title         TEXT,                                -- subject / post / episode title
+  word_count    INTEGER,                             -- body length after cleaning (thin-content signal)
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_source_type ON artifacts(source_type);

@@ -54,3 +54,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE costs ADD COLUMN provider TEXT")
     if "latency_ms" not in cols:
         conn.execute("ALTER TABLE costs ADD COLUMN latency_ms INTEGER")
+    # `artifacts` may predate the word_count column.
+    acols = {r["name"] for r in conn.execute("PRAGMA table_info(artifacts)")}
+    if acols and "word_count" not in acols:
+        conn.execute("ALTER TABLE artifacts ADD COLUMN word_count INTEGER")
