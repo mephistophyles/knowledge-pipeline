@@ -18,11 +18,12 @@ from math import ceil
 from pathlib import Path
 from urllib.parse import urlencode
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Form
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from dashboard import executor
 from pipeline.config import Settings
-from pipeline.db import registry
+from pipeline.db import bootstrap, jobs, registry
 
 app = FastAPI(title="knowledge-pipeline dashboard")
 
@@ -103,10 +104,50 @@ def artifact_detail(conn: sqlite3.Connection, artifact_hash: str) -> dict:
     }
 
 
+# ── control + execution actions (write surface; local only — add auth before exposing) ──
+CONTROL = {"hold", "release", "retry"}
+EXECUTE = {"step", "process"}
+
+
+def _rw_conn(settings: Settings) -> sqlite3.Connection:
+    return bootstrap(settings.db_path)  # writable (WAL) + sqlite-vec loaded
+
+
+def apply_control(conn: sqlite3.Connection, action: str, hashes: list[str]) -> None:
+    for h in hashes:
+        if action == "hold":
+            jobs.hold_artifact(conn, h)
+        elif action == "release":
+            jobs.release_artifact(conn, h)
+        elif action == "retry":
+            conn.execute(
+                "UPDATE jobs SET status='ready', attempts=0, error=NULL, updated_at=datetime('now') "
+                "WHERE artifact_hash=? AND status IN ('failed','held')",
+                (h,),
+            )
+
+
+# Execution (step/process) is serialized + idempotent — see dashboard/executor.py.
+
+
 # ── endpoints ─────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.post("/action/{action}")
+def action(action: str, hash: list[str] = Form(default=[])) -> RedirectResponse:
+    """Apply an action to the selected artifacts. Control actions write immediately;
+    execution (step/process) is queued on the serial, idempotent executor."""
+    settings = Settings.load()
+    if action in CONTROL and hash:
+        conn = _rw_conn(settings)
+        with conn:
+            apply_control(conn, action, hash)
+    elif action in EXECUTE and hash:
+        executor.enqueue(hash, action == "process")
+    return RedirectResponse("/", status_code=303)
 
 
 @app.get("/api/summary")
@@ -138,13 +179,18 @@ def index(
     source: str | None = None,
     media: str | None = None,
     q: str | None = None,
+    status: str | None = None,
+    hide_completed: str | None = None,
     page: int = 1,
 ) -> str:
     try:
         conn = _ro_conn(Settings.load())
     except sqlite3.OperationalError:
         return _page("<p>db not initialised — run <code>pipeline init</code></p>")
-    filters = {"source_type": source_type, "author": author, "source": source, "media": media, "search": q}
+    filters = {
+        "source_type": source_type, "author": author, "source": source, "media": media,
+        "search": q, "status": status, "hide_completed": "1" if hide_completed else None,
+    }
     filters = {k: v for k, v in filters.items() if v}
     with conn:
         ctx = {
@@ -185,11 +231,14 @@ def _filter_bar(facets: dict, filters: dict) -> str:
         return f"<label>{name}<select name={name}>{opts}</select></label>"
 
     selects = "".join(select(f, facets.get(f, [])) for f in registry.FACETS)
+    selects += select("status", ["ready", "running", "held", "done", "failed"])
     q = html.escape(filters.get("search") or "")
+    hide = "checked" if filters.get("hide_completed") else ""
     active = " · <a href='/'>clear</a>" if filters else ""
     return (
         f"<form method=get class=filters>{selects}"
         f"<label>search<input name=q value=\"{q}\" placeholder='title / author'></label>"
+        f"<label><input type=checkbox name=hide_completed value=1 {hide}> hide completed</label>"
         f"<button>filter</button>{active}</form>"
     )
 
@@ -220,13 +269,14 @@ def _render_overview(ctx: dict) -> str:
         active = f"{a['active_stage']} · {a['active_status']}" if a["active_stage"] else "✓ complete"
         h = a["artifact_hash"]
         arows += (
-            f"<tr class={cls}><td><a href='/artifact/{h}'>{html.escape(a.get('title') or h[:12])}</a></td>"
+            f"<tr class={cls}><td><input type=checkbox name=hash value='{h}'></td>"
+            f"<td><a href='/artifact/{h}'>{html.escape(a.get('title') or h[:12])}</a></td>"
             f"<td>{html.escape(a.get('author') or '—')}</td>"
             f"<td>{html.escape(a.get('source_type') or '—')}</td>"
             f"<td>{html.escape(a.get('media') or '—')}</td>"
             f"<td>{a['done']}/{a['total']}</td><td>{html.escape(active)}</td></tr>"
         )
-    arows = arows or "<tr><td colspan=6>no artifacts match — ingest something or clear filters</td></tr>"
+    arows = arows or "<tr><td colspan=7>no artifacts match — ingest something or clear filters</td></tr>"
 
     total, page = ctx["total"], ctx["page"]
     pages = max(ceil(total / PAGE_SIZE), 1)
@@ -245,7 +295,17 @@ def _render_overview(ctx: dict) -> str:
 <table><tr><th>stage</th><th>calls</th><th>usd</th><th>avg ms</th></tr>{crows}</table>
 <h2>artifacts <span class=dim>({total})</span></h2>
 {_filter_bar(ctx['facets'], filters)}{nudge}
-<table><tr><th>title</th><th>author</th><th>type</th><th>media</th><th>progress</th><th>current step</th></tr>{arows}</table>
+<form method=post>
+<div class=actionbar>
+<button formaction=/action/hold>⏸ hold</button>
+<button formaction=/action/release>▶ release</button>
+<button formaction=/action/retry>↻ retry</button>
+<button formaction=/action/step>step 1</button>
+<button formaction=/action/process>process → done</button>
+<span class=dim>— acts on checked rows</span>
+</div>
+<table><tr><th><input type=checkbox title="select all" onclick="for(const c of this.closest('table').querySelectorAll('input[name=hash]'))c.checked=this.checked"></th><th>title</th><th>author</th><th>type</th><th>media</th><th>progress</th><th>current step</th></tr>{arows}</table>
+</form>
 <p class=pager>{prev} · page {page}/{pages} · {nxt}</p>"""
 
 
@@ -287,7 +347,6 @@ def _read_output(path: str | None, limit: int = 6000) -> str:
 
 def _page(body: str) -> str:
     return f"""<!doctype html><meta charset=utf-8>
-<meta http-equiv=refresh content=5>
 <title>knowledge-pipeline</title>
 <style>body{{font:14px/1.5 system-ui;margin:2rem;max-width:960px}}
 h2{{margin-top:1.5rem;font-size:1rem;color:#555}}
@@ -296,10 +355,13 @@ td,th{{border:1px solid #ccc;padding:.3rem .6rem;text-align:left}}th{{background
 .badge{{display:inline-block;background:#eef;padding:.1rem .5rem;border-radius:4px;margin:.1rem}}
 .filters{{margin:.5rem 0}}.filters label{{margin-right:.8rem;font-size:.85rem;color:#555}}
 .filters select,.filters input{{margin-left:.3rem}}
+.actionbar{{margin:.5rem 0}}.actionbar button{{margin-right:.3rem;cursor:pointer;padding:.2rem .5rem}}
+button.refresh{{position:fixed;top:1rem;right:1rem;padding:.3rem .8rem;cursor:pointer}}
 tr.failed{{background:#fdd}}tr.held{{background:#ffd}}
 .failed{{color:#b00}}.live{{color:#0a0;font-size:.7rem;vertical-align:middle}}
 .dim{{color:#999}}.nudge{{color:#b60;font-size:.85rem}}.pager{{margin:.5rem 0;color:#555}}
 pre{{background:#f7f7f7;padding:.5rem;overflow:auto;max-height:24rem}}
 a{{color:#06c}}</style>
+<button class=refresh onclick="location.reload()">↻ refresh</button>
 {body}
-<hr><p><a href=/api/summary>/api/summary</a> · <a href=/health>/health</a> · refreshes every 5s</p>"""
+<hr><p><a href=/api/summary>/api/summary</a> · <a href=/health>/health</a> · manual refresh</p>"""
