@@ -3,7 +3,8 @@ smoke. Helpers take a connection so they test without the Settings/disk plumbing
 from fastapi.testclient import TestClient
 
 from dashboard import app as dash
-from pipeline.db import registry
+from dashboard import executor as dexec
+from pipeline.db import jobs, registry
 from pipeline.ingestors.paste import add_paste
 from pipeline.orchestrator.executor import run_stage
 
@@ -61,6 +62,37 @@ def test_render_overview_smoke(settings, conn):
     out = dash._render_overview(_ctx(conn))
     assert "hello world backlog item" in out  # title shown, not the hash
     assert "filter" in out                     # filter bar present
+
+
+def test_apply_control_hold_release(settings, conn):
+    h = add_paste(settings, conn, "x")
+    dash.apply_control(conn, "hold", [h])
+    assert jobs.get_job(conn, h, "source_note")["status"] == "held"
+    dash.apply_control(conn, "release", [h])
+    assert jobs.get_job(conn, h, "source_note")["status"] == "ready"
+
+
+def test_run_frontier_step_then_process(settings, conn, fake_claims):
+    h = add_paste(settings, conn, "Taste is the differentiator.")
+    assert dexec.run_frontier(settings, conn, h, to_done=False) == ["source_note"]  # one stage
+
+    ran = dexec.run_frontier(settings, conn, h, to_done=True)  # rest of the chain
+    assert "extract_claims" in ran and "entities" in ran
+    assert all(r["status"] == "done" for r in conn.execute("SELECT status FROM jobs WHERE artifact_hash=?", (h,)))
+
+
+def test_enqueue_is_idempotent(monkeypatch):
+    monkeypatch.setattr(dexec, "_ensure_workers", lambda: None)  # don't start/consume the queue
+    dexec._inflight.clear()
+    assert dexec.enqueue(["h1"], True) == ["h1"]
+    assert dexec.enqueue(["h1"], True) == []  # double submit → no-op
+    dexec._inflight.clear()
+
+
+def test_run_frontier_skips_a_claimed_stage(settings, conn):
+    h = add_paste(settings, conn, "x")
+    conn.execute("UPDATE jobs SET status='running' WHERE artifact_hash=? AND stage='source_note'", (h,))
+    assert dexec.run_frontier(settings, conn, h, to_done=True) == []  # already running → not re-run
 
 
 def test_artifacts_filter_by_facet(settings, conn):
