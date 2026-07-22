@@ -1,8 +1,8 @@
 """Email ingestion (plan §4.1): each message → one clean-markdown artifact routed
 into the corpus chain, with headers captured in the manifest. Uses fake message
 objects (shape mirrors imap_tools.MailMessage) so no live IMAP is needed."""
-from pipeline.db import jobs
-from pipeline.ingestors.email import _clean_text, ingest_messages
+from pipeline.db import jobs, registry
+from pipeline.ingestors.email import _clean_text, _normalize, ingest_messages
 from pipeline.storage.manifest import load_artifact, load_manifest
 
 
@@ -51,3 +51,35 @@ def test_ingest_skips_empty_messages(settings, conn):
 
 def test_clean_text_prefers_plain_over_html():
     assert _clean_text(FakeMsg(text="plain here", html="<p>html</p>")) == "plain here"
+
+
+def test_normalize_strips_boilerplate_and_extracts_canonical():
+    raw = (
+        "View this post on the web at https://blog.example/p/the-piece\n"
+        "The real body has a link [ https://substack.com/redirect/abc?j=xyz ] and more here.\n\n\n"
+        "Unsubscribe at https://example/unsub\n© 2026 Author"
+    )
+    clean, canonical = _normalize(raw)
+    assert canonical == "https://blog.example/p/the-piece"
+    assert "View this post" not in clean
+    assert "substack.com/redirect" not in clean
+    assert "Unsubscribe" not in clean
+    assert "The real body has a link" in clean and "more here." in clean
+
+
+def test_email_registers_word_count(settings, conn):
+    h = ingest_messages(settings, conn, [FakeMsg(text="one two three four five six", subject="S")])[0]
+    assert registry.get(conn, h)["word_count"] == 6
+
+
+def test_email_ingest_populates_registry(settings, conn):
+    msg = FakeMsg(
+        text="Body.", from_="author@substack.com", subject="On Taste",
+        headers={"list-id": ("Author <author.substack.com>",)},
+    )
+    h = ingest_messages(settings, conn, [msg])[0]
+    r = registry.get(conn, h)
+    assert r["source_type"] == "email"
+    assert r["author"] == "author@substack.com"
+    assert "author.substack.com" in r["source"]  # grouped by List-Id (the newsletter)
+    assert r["title"] == "On Taste"

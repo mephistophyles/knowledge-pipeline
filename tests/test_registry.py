@@ -26,6 +26,19 @@ def test_query_filter_and_search(conn):
     assert registry.count(conn, filters={"author": "Ann"}) == 1
 
 
+def test_status_filter_and_hide_completed(settings, conn):
+    from pipeline.db import jobs
+    registry.register(conn, "a", source_type="email", title="A")
+    registry.register(conn, "b", source_type="email", title="B")
+    jobs.insert_job(conn, "a", "source_note", "email")           # a: ready
+    jobs.insert_job(conn, "b", "source_note", "email")
+    jobs.mark_done(conn, "b", "source_note", None)               # b: all done
+
+    assert [r["artifact_hash"] for r in registry.query(conn, filters={"status": "ready"})] == ["a"]
+    assert registry.count(conn, filters={"status": "done"}) == 1
+    assert [r["artifact_hash"] for r in registry.query(conn, filters={"hide_completed": "1"})] == ["a"]
+
+
 def test_facet_values(conn):
     registry.register(conn, "h1", source_type="email", author="Ann")
     registry.register(conn, "h2", source_type="paste", author="Bob")

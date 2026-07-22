@@ -38,16 +38,17 @@ providers:
     type: openai_compat
     base_url: http://localhost:11434/v1
     api_key_env: null             # keyless, local, cost 0
+    timeout: 300                  # local models on a big newsletter can be slow
 
 # Per-stage swap point (plan §6.5): each derivation stage independently picks a
 # provider + model + params + prompt_version. Swap a line here to eval a different
 # model/provider for that step; the generating key rides into the note frontmatter.
 models:
   extract_claims:
-    provider: openai
-    model: gpt-4o-mini
-    params: {temperature: 0, max_tokens: 2048}
-    prompt_version: v1
+    provider: ollama          # local/free default (OpenAI needs billing); swap back any time
+    model: gemma4:latest
+    params: {temperature: 0}
+    prompt_version: v2        # v2 targets insights, not every banal fact
     batch: false
   # The cheap model that confirms same-claim vs distinct during dedup (plan §6.3).
   dedup:
@@ -107,3 +108,8 @@ evals:
 worker:
   poll_interval_seconds: 2.0
   max_attempts: 3
+
+# Dashboard-triggered execution (step/process). Serial by default so local Ollama
+# tasks don't stampede; raise once you're on faster/hosted providers.
+execution:
+  max_parallel: 1

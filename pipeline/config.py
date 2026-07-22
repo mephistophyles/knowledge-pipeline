@@ -85,6 +85,12 @@ class Settings:
         return self.raw.get("email", {}) or {}
 
     @property
+    def max_parallel(self) -> int:
+        """Max concurrent dashboard-triggered execution tasks (default 1 — local
+        Ollama tasks must not stampede)."""
+        return int((self.raw.get("execution", {}) or {}).get("max_parallel", 1))
+
+    @property
     def dedup_config(self) -> dict[str, Any]:
         return self._resolution_config("dedup")
 

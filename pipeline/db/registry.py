@@ -22,14 +22,15 @@ def register(
     source: str | None = None,
     media: str = "text",
     title: str | None = None,
+    word_count: int | None = None,
 ) -> None:
     conn.execute(
-        "INSERT INTO artifacts(artifact_hash, source_type, author, source, media, title) "
-        "VALUES(?,?,?,?,?,?) "
+        "INSERT INTO artifacts(artifact_hash, source_type, author, source, media, title, word_count) "
+        "VALUES(?,?,?,?,?,?,?) "
         "ON CONFLICT(artifact_hash) DO UPDATE SET "
         "source_type=excluded.source_type, author=excluded.author, source=excluded.source, "
-        "media=excluded.media, title=excluded.title",
-        (artifact_hash, source_type, author, source, media, title),
+        "media=excluded.media, title=excluded.title, word_count=excluded.word_count",
+        (artifact_hash, source_type, author, source, media, title, word_count),
     )
 
 
@@ -37,32 +38,53 @@ def get(conn: sqlite3.Connection, artifact_hash: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM artifacts WHERE artifact_hash=?", (artifact_hash,)).fetchone()
 
 
-def _where(filters: dict[str, Any] | None) -> tuple[str, list]:
+# Per-artifact current status derived from its job rows (worst-first priority).
+# Matches the dashboard's frontier logic since a linear chain has one live stage.
+_STATUS_SQL = (
+    "(SELECT artifact_hash, CASE "
+    "WHEN SUM(status='failed')>0 THEN 'failed' "
+    "WHEN SUM(status='running')>0 THEN 'running' "
+    "WHEN SUM(status='held')>0 THEN 'held' "
+    "WHEN SUM(status='ready')>0 THEN 'ready' "
+    "ELSE 'done' END AS current_status FROM jobs GROUP BY artifact_hash)"
+)
+
+
+def _build(filters: dict[str, Any] | None) -> tuple[str, str, list]:
+    """Return (join, where, params). Facet/search filter the registry directly;
+    `status` / `hide_completed` join the derived per-artifact status."""
     filters = filters or {}
     clauses, params = [], []
     for facet in FACETS:
-        val = filters.get(facet)
-        if val:
-            clauses.append(f"{facet}=?")
-            params.append(val)
-    search = filters.get("search")
-    if search:
-        clauses.append("(title LIKE ? OR author LIKE ? OR source LIKE ?)")
-        params += [f"%{search}%"] * 3
-    return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+        if filters.get(facet):
+            clauses.append(f"a.{facet}=?")
+            params.append(filters[facet])
+    if filters.get("search"):
+        clauses.append("(a.title LIKE ? OR a.author LIKE ? OR a.source LIKE ?)")
+        params += [f"%{filters['search']}%"] * 3
+    join = ""
+    if filters.get("status") or filters.get("hide_completed"):
+        join = f" JOIN {_STATUS_SQL} j ON a.artifact_hash=j.artifact_hash"
+        if filters.get("status"):
+            clauses.append("j.current_status=?")
+            params.append(filters["status"])
+        if filters.get("hide_completed"):
+            clauses.append("j.current_status!='done'")
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return join, where, params
 
 
 def query(conn: sqlite3.Connection, *, filters: dict | None = None, limit: int = 50, offset: int = 0) -> list[sqlite3.Row]:
-    where, params = _where(filters)
+    join, where, params = _build(filters)
     return conn.execute(
-        f"SELECT * FROM artifacts{where} ORDER BY created_at DESC, artifact_hash LIMIT ? OFFSET ?",
+        f"SELECT a.* FROM artifacts a{join}{where} ORDER BY a.created_at DESC, a.artifact_hash LIMIT ? OFFSET ?",
         [*params, limit, offset],
     ).fetchall()
 
 
 def count(conn: sqlite3.Connection, *, filters: dict | None = None) -> int:
-    where, params = _where(filters)
-    return conn.execute(f"SELECT COUNT(*) n FROM artifacts{where}", params).fetchone()["n"]
+    join, where, params = _build(filters)
+    return conn.execute(f"SELECT COUNT(*) n FROM artifacts a{join}{where}", params).fetchone()["n"]
 
 
 def facet_values(conn: sqlite3.Connection) -> dict[str, list[str]]:

@@ -17,6 +17,7 @@ dependencies = [
     "sqlite-vec>=0.1.9",
     "imap-tools>=1.13.0",
     "html2text>=2025.4.15",
+    "python-multipart>=0.0.32",
 ]
 
 [project.scripts]
