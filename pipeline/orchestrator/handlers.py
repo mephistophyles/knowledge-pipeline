@@ -159,8 +159,10 @@ def dedup(ctx: StageContext) -> str:
                 break
 
         if matched_id:
-            _append_attestation(ctx, matched_id, _attestation(ctx, quote, key.get("model")))
-            attested.append(matched_id)
+            # Author-aware: a repeat from an author already attesting this claim is
+            # emphasis, not corroboration — merge silently without bumping the count.
+            if _append_attestation(ctx, matched_id, _attestation(ctx, quote, key.get("model"))):
+                attested.append(matched_id)
         else:
             claim_id = f"claim-{ctx.artifact_hash[:8]}-{i:02d}"
             att = _attestation(ctx, quote, key.get("model"))
@@ -199,10 +201,27 @@ def _parse_same(text: str) -> bool:
     return False  # conservative: unparseable verdict → distinct, never a bad merge
 
 
+def _author_key(ctx: StageContext) -> str | None:
+    """Identity used to distinguish corroboration (cross-author) from repetition
+    (within-author). Prefers the source's `from` header; normalizes to the bare email
+    (strips display name and substack `+suffix` so one author isn't split)."""
+    raw = ((ctx.manifest.extra or {}).get("from") or "").strip()
+    if not raw:
+        return ctx.manifest.source_url  # fall back to source identity when no author
+    if "<" in raw and ">" in raw:
+        raw = raw[raw.find("<") + 1 : raw.find(">")]
+    email = raw.strip().lower()
+    if "@" in email:
+        local, _, dom = email.partition("@")
+        email = f"{local.split('+')[0]}@{dom}"
+    return email or None
+
+
 def _attestation(ctx: StageContext, quote: str, model: str | None) -> dict:
     return {
         "source_hash": ctx.artifact_hash,
         "source_url": ctx.manifest.source_url,
+        "author": _author_key(ctx),
         "date": date.today().isoformat(),
         "model": model,
         "quote": quote,
@@ -210,7 +229,8 @@ def _attestation(ctx: StageContext, quote: str, model: str | None) -> dict:
 
 
 def _attestation_line(a: dict) -> str:
-    return f"- `{a['source_hash'][:12]}` ({a.get('source_url') or '—'}) — \"{a.get('quote', '')}\" [{a.get('date', '')}]"
+    who = a.get("author") or a.get("source_url") or "—"
+    return f"- **{who}** `{a['source_hash'][:12]}` — \"{a.get('quote', '')}\" [{a.get('date', '')}]"
 
 
 def _claim_body(text: str, attestations: list[dict]) -> str:
@@ -220,11 +240,17 @@ def _claim_body(text: str, attestations: list[dict]) -> str:
     return body
 
 
-def _append_attestation(ctx: StageContext, claim_id: str, attestation: dict) -> None:
+def _append_attestation(ctx: StageContext, claim_id: str, attestation: dict) -> bool:
+    """Append a cross-author attestation. Returns True if it counted as corroboration,
+    False if the author already attests this claim (within-author repetition → skipped)."""
     relpath = f"corpus/claims/{claim_id}.md"
     post = read_note(ctx.vault.root / relpath)
     meta = dict(post.metadata)
-    meta["attestations"] = list(meta.get("attestations") or []) + [attestation]
+    existing = list(meta.get("attestations") or [])
+    author = attestation.get("author")
+    if author is not None and any(a.get("author") == author for a in existing):
+        return False  # same author already recorded — emphasis, not corroboration
+    meta["attestations"] = existing + [attestation]
     content = post.content.rstrip()
     line = _attestation_line(attestation)
     if "## Attestations" in content:
@@ -233,6 +259,7 @@ def _append_attestation(ctx: StageContext, claim_id: str, attestation: dict) -> 
         content = f"{content}\n\n## Attestations\n\n{line}\n"
     ctx.vault.write_note(relpath, meta, content)
     claims_index.bump_attestation(ctx.conn, claim_id)
+    return True
 
 
 def entities(ctx: StageContext) -> str:
