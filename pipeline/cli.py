@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from pipeline.config import Settings
+from pipeline.db import backlog as bl
 from pipeline.db import bootstrap, connect
 from pipeline.db import controls as ctl
 from pipeline.db import jobs
@@ -33,6 +34,8 @@ eval_app = typer.Typer(help="Eval-compare a stage across model/provider variants
 app.add_typer(eval_app, name="eval")
 registry_app = typer.Typer(help="Artifact registry (dashboard backlog metadata).", no_args_is_help=True)
 app.add_typer(registry_app, name="registry")
+backlog_app = typer.Typer(help="Pre-cutoff email backlog: scan once, then batch locally.", no_args_is_help=True)
+app.add_typer(backlog_app, name="backlog")
 
 
 def _settings() -> Settings:
@@ -128,6 +131,98 @@ def ingest_email(
         typer.secho(f"error: {e}", fg="red", err=True)
         raise typer.Exit(1)
     typer.secho(f"ingested {len(hashes)} email(s) from {label!r}", fg="green")
+
+
+# ── backlog (pre-cutoff seed corpus) ─────────────────────────────────────────
+@backlog_app.command("scan")
+def backlog_scan(
+    label: str = typer.Option(..., "--label", help="Gmail label / IMAP folder to scan."),
+    before: str = typer.Option(..., "--before", help="Cutoff date YYYY-MM-DD; only mail sent BEFORE this."),
+) -> None:
+    """One-time read of the mailbox → raw .eml archive + ledger rows. Ingests nothing.
+
+    Read-only and resumable: re-running skips what's already archived.
+    """
+    from pipeline.ingestors.email import scan_backlog
+
+    settings = _settings()
+    conn = _conn(settings)
+    def _tick(c):
+        typer.echo(f"  … {c['seen']} seen ({c['added']} new, {c['known']} known, {c['duplicate']} dup)")
+    try:
+        counts = scan_backlog(settings, conn, label=label, before=before, progress=_tick)
+    except RuntimeError as e:
+        typer.secho(f"error: {e}", fg="red", err=True)
+        raise typer.Exit(1)
+    typer.secho(
+        f"archived {counts['added']} new ({counts['known']} already known, "
+        f"{counts['duplicate']} duplicate) from {counts['seen']} message(s)", fg="green",
+    )
+
+
+@backlog_app.command("batches")
+def backlog_batches(
+    assign: bool = typer.Option(False, "--assign", help="Assign batch ids to unbatched rows first."),
+    all_triage: bool = typer.Option(False, "--all", help="With --assign, batch regardless of triage decision."),
+) -> None:
+    """List batches (one per author) with progress."""
+    settings = _settings()
+    conn = _conn(settings)
+    if assign:
+        n = bl.assign_batches(conn, only_triage=None if all_triage else "process")
+        typer.secho(f"assigned {n} row(s) to batches", fg="yellow")
+    rows = bl.batches(conn)
+    if not rows:
+        typer.echo("no batches yet — run `pipeline backlog batches --assign`")
+        return
+    typer.secho(f"{'batch':<44}{'total':>7}{'done':>7}{'todo':>7}  range", bold=True)
+    for r in rows:
+        span = f"{(r['first_sent'] or '')[:10]} → {(r['last_sent'] or '')[:10]}"
+        typer.echo(f"{(r['batch_id'] or '')[:43]:<44}{r['total']:>7}{r['ingested'] or 0:>7}{r['pending'] or 0:>7}  {span}")
+
+
+@backlog_app.command("run")
+def backlog_run(
+    batch: Optional[str] = typer.Option(None, "--batch", help="Batch id (author) to ingest; default = any."),
+    limit: int = typer.Option(25, "--limit", help="Max messages to ingest this run."),
+    reprocess: bool = typer.Option(False, "--reprocess", help="Re-derive even if the chain already completed."),
+) -> None:
+    """Derive normalized artifacts for archived messages and queue their chains.
+
+    Queues work only — run `pipeline worker …` to execute it.
+    """
+    from pipeline.ingestors.email import ingest_from_eml
+
+    settings = _settings()
+    conn = _conn(settings)
+    VaultWriter(settings.vault_dir).ensure_layout()
+    rows = bl.pending(conn, batch_id=batch, limit=limit)
+    if not rows:
+        typer.echo("nothing pending" + (f" in batch {batch!r}" if batch else ""))
+        return
+    queued = skipped = 0
+    for row in rows:
+        h = ingest_from_eml(settings, conn, row["eml_hash"], reprocess=reprocess)
+        if h:
+            queued += 1
+        else:
+            skipped += 1
+            typer.secho(f"  skipped (empty body): {(row['subject'] or '')[:60]}", fg="yellow")
+    typer.secho(f"queued {queued} artifact(s)" + (f", skipped {skipped}" if skipped else ""), fg="green")
+
+
+@backlog_app.command("status")
+def backlog_status() -> None:
+    """Ledger summary: archive, triage, and ingest progress."""
+    settings = _settings()
+    conn = _conn(settings)
+    s = bl.summary(conn)
+    if not s["total"]:
+        typer.echo("backlog empty — run `pipeline backlog scan --label … --before …`")
+        return
+    typer.secho(f"{s['total']} message(s) from {s['authors']} author(s)", bold=True)
+    typer.echo(f"  archived {s['archived']}   ingested {s['ingested']}   duplicate {s['duplicate']}   skipped {s['skipped']}")
+    typer.echo(f"  triage: process {s['to_process']}   drop {s['to_drop']}   untriaged {s['untriaged']}")
 
 
 # ── workers / scheduler ───────────────────────────────────────────────────────

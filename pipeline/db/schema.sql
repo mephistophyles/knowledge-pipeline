@@ -89,3 +89,26 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_source_type ON artifacts(source_type);
 CREATE INDEX IF NOT EXISTS idx_artifacts_author ON artifacts(author);
 CREATE INDEX IF NOT EXISTS idx_artifacts_source ON artifacts(source);
 CREATE INDEX IF NOT EXISTS idx_artifacts_media ON artifacts(media);
+
+-- Pre-cutoff email backlog ledger. The mailbox is read ONCE into `.eml` archives;
+-- everything after that pages through this table, never IMAP. Identity is the sha256
+-- of the RAW RFC822 bytes, so it survives changes to the normalizer (which rewrite
+-- `artifact_hash` but not `eml_hash`) and re-derivation never needs the mailbox.
+CREATE TABLE IF NOT EXISTS backlog (
+  eml_hash      TEXT PRIMARY KEY,                    -- sha256 of raw message bytes: stable identity
+  eml_key       TEXT    NOT NULL,                    -- blobstore key of the archived .eml
+  message_id    TEXT,                                -- absent/duplicated in the wild → NOT unique
+  artifact_hash TEXT,                                -- normalized artifact currently derived from it
+  author        TEXT,                                -- normalized author key (pipeline.authors)
+  sent_at       TEXT,                                -- INTERNALDATE, ISO8601 — the cutoff is applied to this
+  subject       TEXT,
+  triage        TEXT,                                -- process | drop | review | NULL (not yet triaged)
+  batch_id      TEXT,                                -- assigned batch (author-derived); NULL = unassigned
+  state         TEXT    NOT NULL DEFAULT 'archived', -- archived | ingested | duplicate | skipped
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_backlog_message_id ON backlog(message_id);
+CREATE INDEX IF NOT EXISTS idx_backlog_author ON backlog(author);
+CREATE INDEX IF NOT EXISTS idx_backlog_batch ON backlog(batch_id, state);
+CREATE INDEX IF NOT EXISTS idx_backlog_state ON backlog(state);

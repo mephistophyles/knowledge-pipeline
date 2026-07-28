@@ -21,6 +21,7 @@ from datetime import date
 from pathlib import Path
 from typing import Callable
 
+from pipeline import authors
 from pipeline.db import claims_index, costs, entities_index
 from pipeline.llm import Message, gen_key
 from pipeline.llm import prompts, registry
@@ -203,18 +204,10 @@ def _parse_same(text: str) -> bool:
 
 def _author_key(ctx: StageContext) -> str | None:
     """Identity used to distinguish corroboration (cross-author) from repetition
-    (within-author). Prefers the source's `from` header; normalizes to the bare email
-    (strips display name and substack `+suffix` so one author isn't split)."""
-    raw = ((ctx.manifest.extra or {}).get("from") or "").strip()
-    if not raw:
-        return ctx.manifest.source_url  # fall back to source identity when no author
-    if "<" in raw and ">" in raw:
-        raw = raw[raw.find("<") + 1 : raw.find(">")]
-    email = raw.strip().lower()
-    if "@" in email:
-        local, _, dom = email.partition("@")
-        email = f"{local.split('+')[0]}@{dom}"
-    return email or None
+    (within-author). Prefers the source's `from` header, normalized by
+    `pipeline.authors` (the same function the backlog batches by); falls back to the
+    source identity when the artifact carries no author at all."""
+    return authors.author_key((ctx.manifest.extra or {}).get("from")) or ctx.manifest.source_url
 
 
 def _attestation(ctx: StageContext, quote: str, model: str | None) -> dict:

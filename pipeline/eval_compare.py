@@ -92,7 +92,8 @@ def approve_eval(settings: Settings, conn: sqlite3.Connection, artifact_hash: st
     jobs.mark_done(conn, artifact_hash, stage, chosen)
     nxt = stages.next_stage(job["source_type"], stage)
     if nxt is not None:
-        jobs.insert_job(conn, artifact_hash, nxt, job["source_type"], input_path=chosen)
+        # approving a variant is a deliberate re-derivation: downstream re-runs on it.
+        jobs.insert_job(conn, artifact_hash, nxt, job["source_type"], input_path=chosen, reprocess=True)
     return {"chosen_index": index, "chosen_intermediate": chosen, "next_stage": nxt}
 
 

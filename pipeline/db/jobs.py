@@ -22,13 +22,23 @@ def insert_job(
     *,
     status: str = "ready",
     input_path: str | None = None,
+    reprocess: bool = False,
 ) -> None:
+    """Queue `stage` for `artifact_hash`.
+
+    By default a stage that has already finished is LEFT ALONE. Re-ingesting the same
+    source (identical bytes → identical hash) is not a request to redo work: without
+    this guard, every overlapping backlog batch silently re-ran completed chains and
+    paid for the LLM calls again. Deliberate re-derivation — `walk`, eval-compare,
+    `--reprocess` — passes `reprocess=True` and does reset the row.
+    """
     conn.execute(
         "INSERT INTO jobs(artifact_hash, stage, status, source_type, input_path) "
         "VALUES(?,?,?,?,?) "
         "ON CONFLICT(artifact_hash, stage) DO UPDATE SET "
         "status=excluded.status, input_path=excluded.input_path, "
-        "attempts=0, error=NULL, updated_at=datetime('now')",
+        "attempts=0, error=NULL, updated_at=datetime('now') "
+        + ("" if reprocess else "WHERE jobs.status <> 'done'"),
         (artifact_hash, stage, status, source_type, input_path),
     )
 
