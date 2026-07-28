@@ -2,14 +2,25 @@
 real sqlite-vec index: a corroborating source attests to an existing claim rather
 than duplicating it; a distinct claim gets its own note."""
 from pipeline.db import claims_index as ci
+from pipeline.ingestors.email import ingest_message
 from pipeline.ingestors.paste import add_paste
 from pipeline.orchestrator.executor import run_stage
 from pipeline.vault.writer import read_note
+
+from .conftest import FakeMsg
 
 
 def _walk(settings, conn, h):
     for stage in ("source_note", "extract_claims", "dedup"):
         run_stage(settings, conn, h, stage)
+
+
+def _edition(settings, conn, fake_claims, *, author, body, claim, quote):
+    """Ingest one authored newsletter edition and run it through the chain."""
+    fake_claims["text"] = f'[{{"claim": {claim!r}, "quote": {quote!r}}}]'.replace("'", '"')
+    h = ingest_message(settings, conn, FakeMsg(text=body, from_=author, subject=body[:20]))
+    _walk(settings, conn, h)
+    return h
 
 
 # ── sqlite-vec claim index ────────────────────────────────────────────────────
@@ -61,6 +72,69 @@ def test_distinct_claim_gets_new_note(settings, conn, fake_claims):
 
     assert (settings.vault_dir / f"corpus/claims/claim-{a[:8]}-00.md").exists()
     assert (settings.vault_dir / f"corpus/claims/claim-{b[:8]}-00.md").exists()
+
+
+# ── corroboration is cross-author, not repetition ─────────────────────────────
+def test_same_author_repeating_is_emphasis_not_corroboration(settings, conn, fake_claims):
+    """One writer restating a point across editions must not inflate corroboration."""
+    fake_claims["vector"] = [1, 0, 0, 0, 0, 0, 0, 0]  # every claim embeds identically → near
+    fake_claims["same"] = True  # confirm: the same core assertion
+
+    a = _edition(
+        settings, conn, fake_claims, author="author@substack.com",
+        body="Edition one.", claim="Taste differentiates software.", quote="taste 1",
+    )
+    _edition(
+        settings, conn, fake_claims, author="author@substack.com",
+        body="Edition two, same point again.", claim="Taste is what sets software apart.", quote="taste 2",
+    )
+
+    claim_id = f"claim-{a[:8]}-00"
+    post = read_note(settings.vault_dir / f"corpus/claims/{claim_id}.md")
+    assert len(post["attestations"]) == 1  # the repeat is dropped, not appended
+    assert "taste 2" not in post.content
+    row = conn.execute("SELECT attestations FROM claims WHERE claim_id=?", (claim_id,)).fetchone()
+    assert row["attestations"] == 1
+
+
+def test_distinct_authors_corroborate(settings, conn, fake_claims):
+    fake_claims["vector"] = [1, 0, 0, 0, 0, 0, 0, 0]
+    fake_claims["same"] = True
+
+    a = _edition(
+        settings, conn, fake_claims, author="first@substack.com",
+        body="First writer.", claim="Taste differentiates software.", quote="taste A",
+    )
+    _edition(
+        settings, conn, fake_claims, author="second@example.com",
+        body="Second writer, independently.", claim="Taste is what sets software apart.", quote="taste B",
+    )
+
+    claim_id = f"claim-{a[:8]}-00"
+    post = read_note(settings.vault_dir / f"corpus/claims/{claim_id}.md")
+    assert len(post["attestations"]) == 2
+    assert {x["author"] for x in post["attestations"]} == {"first@substack.com", "second@example.com"}
+    row = conn.execute("SELECT attestations FROM claims WHERE claim_id=?", (claim_id,)).fetchone()
+    assert row["attestations"] == 2
+
+
+def test_author_identity_survives_display_name_and_plus_suffix(settings, conn, fake_claims):
+    """`Name <Author+newsletter@Substack.com>` and `author@substack.com` are one author,
+    so a provider that varies the From header can't fake corroboration."""
+    fake_claims["vector"] = [1, 0, 0, 0, 0, 0, 0, 0]
+    fake_claims["same"] = True
+
+    a = _edition(
+        settings, conn, fake_claims, author="author@substack.com",
+        body="Plain header.", claim="Taste differentiates software.", quote="taste 1",
+    )
+    _edition(
+        settings, conn, fake_claims, author="The Author <Author+weekly@Substack.com>",
+        body="Decorated header, same person.", claim="Taste is what sets software apart.", quote="taste 2",
+    )
+
+    post = read_note(settings.vault_dir / f"corpus/claims/claim-{a[:8]}-00.md")
+    assert len(post["attestations"]) == 1
 
 
 def test_dedup_records_embed_cost(settings, conn, fake_claims):

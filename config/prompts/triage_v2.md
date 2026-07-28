@@ -1,3 +1,9 @@
+<!-- STATUS: no pipeline stage reads this yet. Tuned and measured out-of-band over the
+     ~3,300-edition backlog (86% process / 13.5% drop / 0.1% review, $0.94, zero real
+     content lost). Promoting triage to a real stage ahead of extract_claims is the next
+     change; this prompt is the artifact that run produced, kept so the stage inherits a
+     version that has actually been evaluated. -->
+
 You are the CHEAP FIRST-PASS filter in a two-stage pipeline. A second, more careful
 stage will later try to extract insights from whatever you pass through, and it will
 naturally discard anything thin. So your ONLY job here is to cheaply remove email that
