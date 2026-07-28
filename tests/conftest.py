@@ -8,6 +8,18 @@ from pipeline.llm.base import Completion, Embeddings
 from pipeline.vault import VaultWriter
 
 
+class FakeMsg:
+    """Shape mirrors imap_tools.MailMessage, so ingestors run without live IMAP."""
+
+    def __init__(self, text="", html="", from_="a@x.com", subject="Hi", date="2026-01-01", headers=None):
+        self.text = text
+        self.html = html
+        self.from_ = from_
+        self.subject = subject
+        self.date = date
+        self.headers = headers or {}
+
+
 @pytest.fixture
 def settings(tmp_path):
     """A Settings pointed entirely at a tmp dir (local blob store).

@@ -2,6 +2,9 @@
 /data/
 # The vault is a separate private git repo mounted alongside.
 /vault/
+# Eval/backlog data — real newsletter text, subscription list, extracted claims. Stays
+# LOCAL: public repo + third-party content + personal data. Prompts live in config/prompts/.
+/evals/
 
 # Python
 .venv/

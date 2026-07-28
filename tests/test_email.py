@@ -1,19 +1,11 @@
 """Email ingestion (plan §4.1): each message → one clean-markdown artifact routed
 into the corpus chain, with headers captured in the manifest. Uses fake message
-objects (shape mirrors imap_tools.MailMessage) so no live IMAP is needed."""
+objects (`FakeMsg`, in conftest) so no live IMAP is needed."""
 from pipeline.db import jobs, registry
 from pipeline.ingestors.email import _clean_text, _normalize, ingest_messages
 from pipeline.storage.manifest import load_artifact, load_manifest
 
-
-class FakeMsg:
-    def __init__(self, text="", html="", from_="a@x.com", subject="Hi", date="2026-01-01", headers=None):
-        self.text = text
-        self.html = html
-        self.from_ = from_
-        self.subject = subject
-        self.date = date
-        self.headers = headers or {}
+from .conftest import FakeMsg
 
 
 def test_ingest_email_creates_artifact_with_metadata(settings, conn):

@@ -1,19 +1,47 @@
 # Per-source registry (plan §6.0). Attribution mode drives diarization + claim authorship.
 # Used by the spine ingestors in build step 3; sample entries here fix the schema now.
 feeds:
-  - id: podcast:acquired
+  - id: podcast:the-knowledge-project
     type: podcast
     enabled: true
-    attribution: show          # insights attributed to the show/episode only
-    diarize: false
+    attribution: guest          # flip to show to keep attribution to the show vs guest and hosts
+    hosts: ["Shane Parrish"]
+    diarize: true
     batch_limit: 25
     priority: 5
 
-  - id: podcast:invest-like-the-best
+  - id: podcast:the-tim-ferriss-show
     type: podcast
     enabled: true
     attribution: guest         # insights attributed to speaker entity + episode
-    hosts: ["Patrick O'Shaughnessy"]
+    hosts: ["Tim Ferriss"]
+    diarize: true
+    batch_limit: 25
+    priority: 5
+
+  - id: podcast:the-psychology-of-money-with-morgan-housel
+    type: podcast
+    enabled: true
+    attribution: guest         # insights attributed to speaker entity + episode
+    hosts: ["Morgan Housel"]
+    diarize: true
+    batch_limit: 25
+    priority: 5
+    
+  - id: podcast:unlocking-us-with-brene-brown
+    type: podcast
+    enabled: true
+    attribution: guest         # insights attributed to speaker entity + episode
+    hosts: ["Brene Brown"]
+    diarize: true
+    batch_limit: 10
+    priority: 5
+
+  - id: podcast:naval
+    type: podcast
+    enabled: true
+    attribution: show          
+    hosts: ["Naval Ravikant", "Babak Nivi", "Brett Hall"]
     diarize: true
     batch_limit: 25
     priority: 5

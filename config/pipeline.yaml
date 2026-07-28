@@ -34,6 +34,25 @@ providers:
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
     # no batch discount → runs bounded-concurrency async (later PR)
+    # USD per 1M tokens, from OpenRouter's live model list (openrouter.ai/api/v1/models).
+    # Model ids are OpenRouter slugs (note the dots, e.g. claude-haiku-4.5).
+    pricing:
+      anthropic/claude-haiku-4.5: {in: 1.00, out: 5.00}
+      anthropic/claude-sonnet-5:  {in: 2.00, out: 10.00}
+      openai/gpt-5-mini:          {in: 0.25, out: 2.00}
+      openai/gpt-5.1:             {in: 1.25, out: 10.00}
+      poolside/laguna-s-2.1:      {in: 0.10, out: 0.20}   # promo :free slug is $0; this is the post-promo rate
+      poolside/laguna-s-2.1:free: {in: 0.00, out: 0.00}
+      # Strong-model bracket — the extraction quality CEILING. If v3 is clean here,
+      # the prompt is done; then measure how far down the cost ladder quality holds.
+      z-ai/glm-5.2:               {in: 0.79, out: 2.49}
+      deepseek/deepseek-v4-pro:   {in: 0.44, out: 0.87}
+      # Cheap+fast, non-reasoning — TRIAGE + dedup-confirm model (validated).
+      # Whole Insight triage pass (~3.3k emails) ≈ $0.65; a fraction of local-gemma wall-time.
+      deepseek/deepseek-v4-flash: {in: 0.098, out: 0.196}
+      # EXTRACTION model (bake-off winner): reliable, ~GLM-5.2 quality, ~30% cheaper.
+      # A `:free` slug exists ($0, shared-pool daily cap) for zero-cost runs; this is paid.
+      nvidia/nemotron-3-ultra-550b-a55b: {in: 0.50, out: 2.20}
   ollama:
     type: openai_compat
     base_url: http://localhost:11434/v1
@@ -45,17 +64,19 @@ providers:
 # model/provider for that step; the generating key rides into the note frontmatter.
 models:
   extract_claims:
-    provider: ollama          # local/free default (OpenAI needs billing); swap back any time
-    model: gemma4:latest
-    params: {temperature: 0}
-    prompt_version: v2        # v2 targets insights, not every banal fact
+    provider: openrouter      # bake-off winner; ollama gemma4 remains a free local fallback
+    model: nvidia/nemotron-3-ultra-550b-a55b
+    params: {temperature: 0, max_tokens: 4096}   # generous: reasoning models truncate small caps
+    prompt_version: v4        # v4: generalize (transferable principle, not the case's facts)
     batch: false
   # The cheap model that confirms same-claim vs distinct during dedup (plan §6.3).
+  # Fast non-reasoning (validated): at ~170 confirms per author's editions, gemma4's ~10s/call
+  # was the seed bottleneck. prompt_version v2 tightens "same" to the same CORE assertion.
   dedup:
-    provider: ollama
-    model: gemma4:latest
-    params: {temperature: 0}
-    prompt_version: v1
+    provider: openrouter
+    model: deepseek/deepseek-v4-flash
+    params: {temperature: 0, max_tokens: 200}
+    prompt_version: v2
   # Entity extraction + same-entity tiebreak (plan §6.4). One model, two prompts
   # (entities_extract / entities_confirm), both at this prompt_version.
   entities:
@@ -78,8 +99,11 @@ embeddings:
 # Dedup tuning: a candidate matches an existing claim when its nearest neighbour's
 # L2 distance (unit-normalized embeddings) is below max_distance; the top-k
 # shortlist is then confirmed by the `models.dedup` model above.
+# 0.72 chosen by sweep on real v4 claims (nomic embeddings): 0.6 was effectively
+# dedup-OFF (near-verbatim only); 0.72 ≈ cosine 0.74 catches reworded paraphrases while
+# the confirm LLM rejects far pairs. nomic beat mxbai/bge (equal quality, fewest confirms).
 dedup:
-  max_distance: 0.6
+  max_distance: 0.72
   shortlist_k: 5
 
 # Entity resolution tuning (plan §6.4): after an exact (name, entity_type) string
@@ -102,8 +126,18 @@ email:
 # want to benchmark.
 evals:
   extract_claims:
-    - {provider: openai, model: gpt-4o-mini, params: {temperature: 0}, prompt_version: v1}
-    - {provider: ollama, model: gemma4:latest, params: {temperature: 0}, prompt_version: v1}
+    # Cost/quality spread across providers. gemma4 = free local baseline; the four
+    # OpenRouter variants span cheap→strong Claude and cheap→strong GPT. prompt_version
+    # v2 = the insight-focused prompt. Trim or add slugs to change the benchmark set.
+    # v2-vs-v3 A/B on the strong bracket (GLM 5.2 + DeepSeek v4 Pro) — establishes the
+    # extraction ceiling and isolates the prompt effect. max_tokens generous: no truncation.
+    - {provider: openrouter, model: z-ai/glm-5.2,               params: {temperature: 0, max_tokens: 4096}, prompt_version: v2}
+    - {provider: openrouter, model: z-ai/glm-5.2,               params: {temperature: 0, max_tokens: 4096}, prompt_version: v3}
+    - {provider: openrouter, model: deepseek/deepseek-v4-pro,   params: {temperature: 0, max_tokens: 4096}, prompt_version: v2}
+    - {provider: openrouter, model: deepseek/deepseek-v4-pro,   params: {temperature: 0, max_tokens: 4096}, prompt_version: v3}
+    # Once the prompt is locked, add cheaper contenders to find the quality/cost floor:
+    # - {provider: openrouter, model: poolside/laguna-s-2.1,      params: {temperature: 0, max_tokens: 4096}, prompt_version: v3}
+    # - {provider: ollama,     model: gemma4:latest,             params: {temperature: 0, max_tokens: 4096}, prompt_version: v3}
 
 worker:
   poll_interval_seconds: 2.0
