@@ -14,6 +14,7 @@ eval-compare / offline / promote clean, plan invariant 3):
 """
 from __future__ import annotations
 
+import ast
 import json
 import math
 import re
@@ -456,22 +457,70 @@ def _parse_claims(text: str) -> list[dict]:
 
 
 def _extract_json(text: str):
+    """Recover a JSON value from a model response, tolerating the ways models deviate.
+
+    Silent total loss lives here: a response that fails to parse yields zero claims and
+    looks identical to "the source had nothing worth extracting". On a 178-edition run
+    this dropped every claim from 8 editions (4.5%) whose content was perfectly good.
+    Each fallback below corresponds to an observed real failure, in order of frequency.
+    """
     text = (text or "").strip()
     if text.startswith("```"):
-        text = text.strip("`")
-        text = re.sub(r"^json\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"```\s*$", "", text).strip()
     try:
         return json.loads(text)
     except Exception:
         pass
-    # Salvage the outermost array or object embedded in surrounding prose.
-    for open_c, close_c in (("[", "]"), ("{", "}")):
-        i, j = text.find(open_c), text.rfind(close_c)
-        if i != -1 and j > i:
-            try:
-                return json.loads(text[i : j + 1])
-            except Exception:
-                continue
+
+    decoder = json.JSONDecoder()
+
+    # (1) Trailing prose after a valid array — the most common failure. Models append
+    # commentary, often echoing the prompt back ("Return [] only if ..."), and that text
+    # carries its own brackets. Spanning first-'[' to last-']' therefore swallows the
+    # prose and fails; raw_decode stops at the end of the first well-formed value.
+    i = text.find("[")
+    while i != -1:
+        try:
+            return decoder.raw_decode(text[i:])[0]
+        except Exception:
+            i = text.find("[", i + 1)
+
+    # (2) Python-style output: single-quoted strings, which are not valid JSON.
+    start, end = text.find("["), text.rfind("]")
+    if start != -1 and end > start:
+        try:
+            return ast.literal_eval(text[start : end + 1])
+        except Exception:
+            pass
+
+    # (3) Salvage every complete object. Covers a response truncated at the token cap
+    # mid-object, and an array where ONE entry has bad quoting — recovering the other
+    # entries beats losing the whole edition to a single malformed neighbour.
+    salvaged, i = [], text.find("{")
+    while i != -1:
+        try:
+            value, consumed = decoder.raw_decode(text[i:])
+        except Exception:
+            i = text.find("{", i + 1)
+            continue
+        if isinstance(value, dict) and (value.get("claim") or value.get("text")):
+            salvaged.append(value)
+        i = text.find("{", i + consumed)
+    if salvaged:
+        return salvaged
+
+    # (4) Last resort: a wrapper object like {"claims": [...]}.
+    i = text.find("{")
+    while i != -1:
+        try:
+            value = decoder.raw_decode(text[i:])[0]
+        except Exception:
+            i = text.find("{", i + 1)
+            continue
+        if isinstance(value, dict):
+            return value
+        i = text.find("{", i + 1)
     return None
 
 
