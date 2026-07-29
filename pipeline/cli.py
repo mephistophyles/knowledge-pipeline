@@ -211,6 +211,37 @@ def backlog_run(
     typer.secho(f"queued {queued} artifact(s)" + (f", skipped {skipped}" if skipped else ""), fg="green")
 
 
+@backlog_app.command("failures")
+def backlog_failures(
+    batch: Optional[str] = typer.Option(None, "--batch", help="Restrict to one batch."),
+    limit: int = typer.Option(50, "--limit"),
+) -> None:
+    """List backlog messages whose chain failed, with the stage and error."""
+    settings = _settings()
+    conn = _conn(settings)
+    rows = bl.failures(conn, batch_id=batch, limit=limit)
+    if not rows:
+        typer.secho("no failed stages in the backlog", fg="green")
+        return
+    for r in rows:
+        typer.secho(f"{r['eml_hash'][:12]}  {r['stage']:<15} attempts={r['attempts']}", fg="red")
+        typer.echo(f"    {(r['author'] or '?')}  {(r['subject'] or '')[:70]}")
+        typer.echo(f"    {(r['error'] or '')[:110]}")
+    typer.echo(f"\n{len(rows)} failed stage(s) — `pipeline backlog retry` to requeue")
+
+
+@backlog_app.command("retry")
+def backlog_retry(
+    batch: Optional[str] = typer.Option(None, "--batch", help="Restrict to one batch."),
+    stage: Optional[str] = typer.Option(None, "--stage", help="Restrict to one stage."),
+) -> None:
+    """Requeue only the failed stages — not the whole batch."""
+    settings = _settings()
+    conn = _conn(settings)
+    n = bl.requeue_failed(conn, batch_id=batch, stage=stage)
+    typer.secho(f"requeued {n} failed stage(s)", fg="yellow" if n else "green")
+
+
 @backlog_app.command("status")
 def backlog_status() -> None:
     """Ledger summary: archive, triage, and ingest progress."""
@@ -223,6 +254,12 @@ def backlog_status() -> None:
     typer.secho(f"{s['total']} message(s) from {s['authors']} author(s)", bold=True)
     typer.echo(f"  archived {s['archived']}   ingested {s['ingested']}   duplicate {s['duplicate']}   skipped {s['skipped']}")
     typer.echo(f"  triage: process {s['to_process']}   drop {s['to_drop']}   untriaged {s['untriaged']}")
+    rows = bl.progress(conn)
+    if rows:
+        typer.secho("\nchain progress (ledger rows only):", bold=True)
+        for r in rows:
+            colour = "red" if r["status"] == "failed" else None
+            typer.secho(f"  {r['stage']:<16}{r['status']:<9}{r['n']}", fg=colour)
 
 
 # ── workers / scheduler ───────────────────────────────────────────────────────

@@ -121,6 +121,62 @@ def get(conn: sqlite3.Connection, eml_hash: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM backlog WHERE eml_hash=?", (eml_hash,)).fetchone()
 
 
+def progress(conn: sqlite3.Connection, *, batch_id: str | None = None) -> list[sqlite3.Row]:
+    """Per-stage job status rolled up across the ledger.
+
+    The ledger row and the job rows are joined on `artifact_hash`, so every message
+    is accounted for by name rather than by count — "3 failed" is only useful if you
+    can say which three.
+    """
+    sql = (
+        "SELECT j.stage, j.status, COUNT(*) n FROM backlog b JOIN jobs j "
+        "ON j.artifact_hash = b.artifact_hash WHERE b.artifact_hash IS NOT NULL"
+    )
+    params: list = []
+    if batch_id:
+        sql += " AND b.batch_id=?"
+        params.append(batch_id)
+    return conn.execute(sql + " GROUP BY j.stage, j.status ORDER BY j.stage, j.status", params).fetchall()
+
+
+def failures(conn: sqlite3.Connection, *, batch_id: str | None = None, limit: int = 100) -> list[sqlite3.Row]:
+    """Ledger rows whose chain has a failed stage — the retry work-list."""
+    sql = (
+        "SELECT b.eml_hash, b.author, b.subject, b.sent_at, j.stage, j.attempts, j.error "
+        "FROM backlog b JOIN jobs j ON j.artifact_hash = b.artifact_hash "
+        "WHERE j.status='failed'"
+    )
+    params: list = []
+    if batch_id:
+        sql += " AND b.batch_id=?"
+        params.append(batch_id)
+    return conn.execute(sql + " ORDER BY b.sent_at LIMIT ?", params + [limit]).fetchall()
+
+
+def requeue_failed(conn: sqlite3.Connection, *, batch_id: str | None = None, stage: str | None = None) -> int:
+    """Reset failed stages back to `ready` for ledger rows, clearing the attempt count.
+
+    Targeted by design: it touches only rows that actually failed, so retrying costs
+    exactly the editions that need it rather than re-running a whole batch.
+    """
+    sql = (
+        "UPDATE jobs SET status='ready', attempts=0, error=NULL, updated_at=datetime('now') "
+        "WHERE status='failed' AND artifact_hash IN (SELECT artifact_hash FROM backlog "
+        "WHERE artifact_hash IS NOT NULL"
+    )
+    params: list = []
+    if batch_id:
+        sql += " AND batch_id=?"
+        params.append(batch_id)
+    sql += ")"
+    if stage:
+        sql += " AND stage=?"
+        params.append(stage)
+    cur = conn.execute(sql, params)
+    conn.commit()
+    return cur.rowcount
+
+
 def summary(conn: sqlite3.Connection) -> dict:
     row = conn.execute(
         "SELECT COUNT(*) AS total, SUM(state='archived') AS archived, SUM(state='ingested') AS ingested, "

@@ -77,3 +77,27 @@ def test_registry_unknown_provider_raises(settings):
 
     with pytest.raises(LLMError):
         registry.get_provider(settings, "nope")
+
+
+def test_empty_choices_raises_legible_error_not_typeerror():
+    """A 200 response carrying an `error` payload and no choices — how OpenRouter
+    reports a throttled free pool — must name the cause, not raise TypeError."""
+    from pipeline.llm.base import LLMError, Message
+
+    class _Resp:
+        choices = None
+        error = {"message": "rate limit exceeded: free-tier pool"}
+        usage = None
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**_):
+                    return _Resp()
+
+    p = OpenAICompatProvider(name="fake", base_url="http://x", api_key=None)
+    p._client = _Client()
+    with pytest.raises(LLMError) as e:
+        p.complete([Message("system", "s")], "m", {})
+    assert "rate limit exceeded" in str(e.value)

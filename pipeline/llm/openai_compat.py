@@ -41,7 +41,19 @@ class OpenAICompatProvider:
             raise LLMError(f"{self.name}/{model}: {e}") from e
         latency_ms = int((time.monotonic() - t0) * 1000)
 
-        text = resp.choices[0].message.content or ""
+        # An OpenAI-compatible endpoint can return HTTP 200 with NO choices and an
+        # `error` payload instead — this is how OpenRouter reports a throttled free
+        # pool or an upstream failure. Subscripting blindly turned that into an opaque
+        # TypeError that looked like a parsing bug; surface what actually happened so
+        # a rate limit is legible as a rate limit.
+        choices = getattr(resp, "choices", None)
+        if not choices:
+            detail = getattr(resp, "error", None) or "no choices in response"
+            if isinstance(detail, dict):
+                detail = detail.get("message") or detail
+            raise LLMError(f"{self.name}/{model}: {detail}")
+
+        text = choices[0].message.content or ""
         usage = getattr(resp, "usage", None)
         tokens_in = int(getattr(usage, "prompt_tokens", 0) or 0)
         tokens_out = int(getattr(usage, "completion_tokens", 0) or 0)

@@ -142,3 +142,29 @@ def test_pending_is_oldest_first_so_corroboration_accumulates_in_order(settings,
 def test_ingest_from_eml_rejects_unknown_hash(settings, conn):
     with pytest.raises(KeyError):
         ingest_from_eml(settings, conn, "0" * 64)
+
+
+# ── nuanced retry: which messages failed, and requeue only those ─────────────
+def test_failures_and_retry_target_only_the_broken_rows(settings, conn, fake_claims):
+    ok = archive_message(settings, conn, _eml(body="Fine.", mid="<1@x>"))
+    bad = archive_message(settings, conn, _eml(body="Broken.", mid="<2@x>"))
+    h_ok = ingest_from_eml(settings, conn, ok["eml_hash"])
+    h_bad = ingest_from_eml(settings, conn, bad["eml_hash"])
+    jobs.mark_failed(conn, h_bad, "source_note", "boom")
+    conn.commit()
+
+    rows = bl.failures(conn)
+    assert [r["eml_hash"] for r in rows] == [bad["eml_hash"]]
+    assert rows[0]["stage"] == "source_note" and "boom" in rows[0]["error"]
+
+    assert bl.requeue_failed(conn) == 1  # only the failed one is touched
+    assert jobs.get_job(conn, h_bad, "source_note")["status"] == "ready"
+    assert jobs.get_job(conn, h_ok, "source_note")["status"] == "ready"
+    assert bl.failures(conn) == []
+
+
+def test_progress_rolls_up_ledger_rows_by_stage(settings, conn, fake_claims):
+    res = archive_message(settings, conn, _eml())
+    ingest_from_eml(settings, conn, res["eml_hash"])
+    rows = {(r["stage"], r["status"]): r["n"] for r in bl.progress(conn)}
+    assert rows[("source_note", "ready")] == 1
