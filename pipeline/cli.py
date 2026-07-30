@@ -273,6 +273,10 @@ def groom(
     plan_file: Optional[str] = typer.Option(
         None, "--plan", help="Apply a saved plan instead of re-running the (slow) pass."
     ),
+    workers: int = typer.Option(8, "--workers", help="Parallel confirm calls."),
+    prompt_version: Optional[str] = typer.Option(
+        None, "--prompt-version", help="Override the dedup_confirm prompt version (e.g. v3)."
+    ),
 ) -> None:
     """Retroactively dedup claims ALREADY in the vault. Dry run unless --apply.
 
@@ -303,11 +307,25 @@ def groom(
         )
         raise typer.Exit(1)
 
+    # Confirm calls are independent, so they run in parallel; the greedy planner that
+    # consumes them is order-dependent and stays sequential (off cache, so it's fast).
+    warm = corpus_dedup.warm_cache(
+        settings, conn, max_distance=max_distance, author=author, workers=workers,
+        prompt_version=prompt_version,
+        progress=lambda s: typer.echo(f"  … confirmed {s['done']}/{s['pairs']} pair(s)"),
+    )
+    if warm["pairs"]:
+        typer.secho(
+            f"warmed {warm['done']}/{warm['pairs']} verdict(s)"
+            + (f", {warm['errors']} error(s)" if warm["errors"] else ""), fg="cyan",
+        )
+
     def _tick(p):
-        typer.echo(f"  … examined {p.examined}, {len(p.pairs)} merge(s) found, {p.confirms} confirms")
+        typer.echo(f"  … examined {p.examined}, {len(p.pairs)} merge(s) found")
 
     plan = corpus_dedup.plan_merges(
-        settings, conn, max_distance=max_distance, author=author, progress=_tick
+        settings, conn, max_distance=max_distance, author=author,
+        prompt_version=prompt_version, progress=_tick,
     )
     if out:  # save BEFORE printing: planning is the hour, applying is instant
         typer.secho(f"plan saved → {plan.save(out)}", fg="cyan")

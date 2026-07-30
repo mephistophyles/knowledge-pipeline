@@ -16,9 +16,10 @@ beyond confirm calls.
 """
 from __future__ import annotations
 
-import sqlite3
 import json
-from dataclasses import dataclass, field
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from pipeline.config import Settings
@@ -79,18 +80,119 @@ def _live_claims(conn: sqlite3.Connection, batch_author: str | None) -> list[sql
     return conn.execute(sql + " ORDER BY c.created_at, c.claim_id", params).fetchall()
 
 
+def candidate_pairs(
+    conn: sqlite3.Connection, threshold: float, shortlist_k: int, author: str | None
+) -> list[tuple[str, str, str, str, float]]:
+    """Every (neighbour, claim) pair within `threshold`. No LLM calls.
+
+    Same orientation and ordering the planner uses, so warming produces exactly the
+    verdicts it will later look up.
+    """
+    pairs = []
+    for row in _live_claims(conn, author):
+        vec = claims_index.get_vector(conn, row["claim_id"])
+        if vec is None:
+            continue
+        for m in claims_index.nearest(conn, vec, shortlist_k + 1):
+            if m["claim_id"] == row["claim_id"]:
+                continue
+            if m["distance"] > threshold:
+                break
+            pairs.append((m["claim_id"], row["claim_id"], m["text"], row["text"], m["distance"]))
+    return pairs
+
+
+def warm_cache(
+    settings: Settings,
+    conn: sqlite3.Connection,
+    *,
+    max_distance: float | None = None,
+    author: str | None = None,
+    workers: int = 8,
+    prompt_version: str | None = None,
+    progress=None,
+) -> dict:
+    """Pre-compute confirm verdicts in parallel, then let the planner run off cache.
+
+    The planner is greedy — each merge changes what later claims are compared against —
+    so it cannot be parallelised without changing its answer. Confirm CALLS are
+    independent, though, so they can be. Warming does slightly more work than the
+    sequential path (it judges pairs the greedy planner would have skipped), but those
+    verdicts are cached and reused by every other threshold, so it is prefetch rather
+    than waste.
+    """
+    dcfg = settings.dedup_config
+    threshold = dcfg["max_distance"] if max_distance is None else max_distance
+    mc = settings.stage_model("dedup")
+    if prompt_version:
+        mc = replace(mc, prompt_version=prompt_version)
+    provider = registry.get_provider(settings, mc.provider)
+    prompt = prompts.load_prompt(settings, "dedup_confirm", mc.prompt_version)
+
+    todo = []
+    for a_id, b_id, a_text, b_text, dist in candidate_pairs(conn, threshold, dcfg["shortlist_k"], author):
+        hit = conn.execute(
+            "SELECT 1 FROM dedup_verdicts WHERE prompt_version=? AND model=? AND claim_a=? AND claim_b=?",
+            (mc.prompt_version, mc.model, a_id, b_id),
+        ).fetchone()
+        if hit is None:
+            todo.append((a_id, b_id, a_text, b_text, dist))
+
+    stats = {"pairs": len(todo), "done": 0, "errors": 0}
+    if not todo:
+        return stats
+
+    def _judge(item):
+        a_id, b_id, a_text, b_text, dist = item
+        verdict = provider.complete(
+            [Message("system", prompt), Message("user", f"A: {a_text}\nB: {b_text}")],
+            mc.model, mc.params,
+        )
+        return a_id, b_id, dist, _parse_same(verdict.text), verdict
+
+    # LLM calls run in threads; every DB write stays on this thread — the sqlite
+    # connection is not shared across threads.
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for future in as_completed([pool.submit(_judge, i) for i in todo]):
+            try:
+                a_id, b_id, dist, same, verdict = future.result()
+            except Exception:
+                stats["errors"] += 1
+                continue
+            conn.execute(
+                "INSERT OR REPLACE INTO dedup_verdicts"
+                "(prompt_version, model, claim_a, claim_b, same, distance) VALUES(?,?,?,?,?,?)",
+                (mc.prompt_version, mc.model, a_id, b_id, int(same), dist),
+            )
+            costs.record(
+                conn, "", "corpus_dedup:confirm", verdict.model, verdict.tokens_in,
+                verdict.tokens_out, verdict.usd, provider=verdict.provider,
+                latency_ms=verdict.latency_ms,
+            )
+            stats["done"] += 1
+            if stats["done"] % 25 == 0:
+                conn.commit()
+                if progress:
+                    progress(stats)
+    conn.commit()
+    return stats
+
+
 def plan_merges(
     settings: Settings,
     conn: sqlite3.Connection,
     *,
     max_distance: float | None = None,
     author: str | None = None,
+    prompt_version: str | None = None,
     progress=None,
 ) -> Plan:
     """Find claims that should merge. Read-only: no vault or index writes."""
     dcfg = settings.dedup_config
     threshold = dcfg["max_distance"] if max_distance is None else max_distance
     confirm_mc = settings.stage_model("dedup")
+    if prompt_version:
+        confirm_mc = replace(confirm_mc, prompt_version=prompt_version)
     provider = registry.get_provider(settings, confirm_mc.provider)
     prompt = prompts.load_prompt(settings, "dedup_confirm", confirm_mc.prompt_version)
 
