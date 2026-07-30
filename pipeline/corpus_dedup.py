@@ -34,7 +34,8 @@ MERGED_DIR = "corpus/claims/merged"
 @dataclass
 class Plan:
     pairs: list[tuple[str, str, float]] = field(default_factory=list)  # (survivor, absorbed, distance)
-    confirms: int = 0
+    confirms: int = 0          # calls actually made to the model
+    cached: int = 0            # verdicts reused from a previous pass
     examined: int = 0
 
     def save(self, path: str | Path) -> Path:
@@ -111,17 +112,34 @@ def plan_merges(
                 "SELECT merged_into FROM claims WHERE claim_id=?", (m["claim_id"],)
             ).fetchone()["merged_into"]:
                 continue
-            verdict = provider.complete(
-                [Message("system", prompt), Message("user", f"A: {m['text']}\nB: {row['text']}")],
-                confirm_mc.model, confirm_mc.params,
-            )
-            plan.confirms += 1
-            costs.record(
-                conn, row["artifact_hash"] or "", "corpus_dedup:confirm", verdict.model,
-                verdict.tokens_in, verdict.tokens_out, verdict.usd,
-                provider=verdict.provider, latency_ms=verdict.latency_ms,
-            )
-            if _parse_same(verdict.text):
+            cached = conn.execute(
+                "SELECT same FROM dedup_verdicts WHERE prompt_version=? AND model=? "
+                "AND claim_a=? AND claim_b=?",
+                (confirm_mc.prompt_version, confirm_mc.model, m["claim_id"], row["claim_id"]),
+            ).fetchone()
+            if cached is not None:
+                plan.cached += 1
+                same = bool(cached["same"])
+            else:
+                verdict = provider.complete(
+                    [Message("system", prompt), Message("user", f"A: {m['text']}\nB: {row['text']}")],
+                    confirm_mc.model, confirm_mc.params,
+                )
+                plan.confirms += 1
+                costs.record(
+                    conn, row["artifact_hash"] or "", "corpus_dedup:confirm", verdict.model,
+                    verdict.tokens_in, verdict.tokens_out, verdict.usd,
+                    provider=verdict.provider, latency_ms=verdict.latency_ms,
+                )
+                same = _parse_same(verdict.text)
+                conn.execute(
+                    "INSERT OR REPLACE INTO dedup_verdicts"
+                    "(prompt_version, model, claim_a, claim_b, same, distance) VALUES(?,?,?,?,?,?)",
+                    (confirm_mc.prompt_version, confirm_mc.model, m["claim_id"], row["claim_id"],
+                     int(same), m["distance"]),
+                )
+                conn.commit()
+            if same:
                 # The neighbour is older (it was indexed first), so it survives.
                 plan.pairs.append((m["claim_id"], row["claim_id"], m["distance"]))
                 absorbed.add(row["claim_id"])

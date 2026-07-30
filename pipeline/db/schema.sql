@@ -114,3 +114,18 @@ CREATE INDEX IF NOT EXISTS idx_backlog_message_id ON backlog(message_id);
 CREATE INDEX IF NOT EXISTS idx_backlog_author ON backlog(author);
 CREATE INDEX IF NOT EXISTS idx_backlog_batch ON backlog(batch_id, state);
 CREATE INDEX IF NOT EXISTS idx_backlog_state ON backlog(state);
+
+-- Cached dedup confirm verdicts. Grooming re-runs (different threshold, same prompt)
+-- otherwise re-ask the model identical questions: a threshold sweep costs one paid
+-- pass per PROMPT instead of one per (prompt, threshold) pair. Keyed by prompt+model
+-- because a verdict is only reusable under the exact judge that produced it.
+CREATE TABLE IF NOT EXISTS dedup_verdicts (
+  prompt_version TEXT NOT NULL,
+  model          TEXT NOT NULL,
+  claim_a        TEXT NOT NULL,
+  claim_b        TEXT NOT NULL,
+  same           INTEGER NOT NULL,
+  distance       REAL,
+  at             TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (prompt_version, model, claim_a, claim_b)
+);
