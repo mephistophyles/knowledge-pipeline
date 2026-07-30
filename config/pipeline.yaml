@@ -76,7 +76,7 @@ models:
     provider: openrouter
     model: deepseek/deepseek-v4-flash
     params: {temperature: 0, max_tokens: 200}
-    prompt_version: v2
+    prompt_version: v3
   # Entity extraction + same-entity tiebreak (plan §6.4). One model, two prompts
   # (entities_extract / entities_confirm), both at this prompt_version.
   entities:
@@ -103,16 +103,18 @@ embeddings:
 # dedup-OFF (near-verbatim only); 0.72 ≈ cosine 0.74 catches reworded paraphrases while
 # the confirm LLM rejects far pairs. nomic beat mxbai/bge (equal quality, fewest confirms).
 #
-# SEED RUN: set to 0.0 — every claim becomes its own note, nothing is merged. During
-# the backlog seed we would rather double-count a claim than lose one: a merge is
-# destructive (the second phrasing is gone), while a duplicate is a grooming task
-# against a corpus that exists. Restore 0.72 for the ongoing feed, once the vault is
-# real enough to groom. NOTE: merging retroactively needs a corpus-wide dedup pass
-# that does not exist yet — claims.text and the vectors are stored, so it is
-# buildable, but it is not free.
+# POLICY (set 2026-07-30 from the pilot sweep): dedup_confirm v3 @ max_distance 0.72.
+# The sweep isolated the two levers on 1,868 pairs judged by BOTH prompts:
+#   threshold alone (v2, 0.65 -> 0.72): +103 merges
+#   prompt alone    (at 0.72, v3 -> v2): +119 merges
+# The PROMPT is the bigger lever, which inverts the assumption behind the earlier
+# max_distance sweep. v2 calls 19.2% of pairs the same claim, v3 only 8.7%; they agree
+# on 85.3%. v3 is chosen because a false merge demotes a distinct insight to an
+# 'alternate phrasing' sub-bullet, while a missed merge just leaves two notes.
+# Known cost: v3 is strict enough to miss genuine synonyms (it split a 0.458-distance
+# pair differing only in stress/arousal and concentration/awareness).
 dedup:
-  max_distance: -1.0       # seed: OFF (distances are >=0, so nothing ever matches).
-                           # 0.72 = the tuned value; restore it for the ongoing feed.
+  max_distance: 0.72       # POLICY. Swept on the 1,213-claim pilot at v2/v3 x 0.65/0.72.
   shortlist_k: 5
 
 # Entity resolution tuning (plan §6.4): after an exact (name, entity_type) string

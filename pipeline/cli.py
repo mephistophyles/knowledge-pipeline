@@ -94,6 +94,37 @@ def add_paste(
     typer.secho(f"ingested {h[:12]}  (stage: {stages.first_stage(type_)} ready)", fg="green")
 
 
+@add_app.command("web")
+def add_web(
+    url: str = typer.Option(..., "--url", help="Canonical article URL (provenance)."),
+    author: Optional[str] = typer.Option(
+        None, "--author", help="Stable author id for this site (email/handle/name). Defaults to the hostname."
+    ),
+    title: Optional[str] = typer.Option(None, "--title", help="Article title (defaults to the first line)."),
+    file: Optional[str] = typer.Option(None, "--file", "-f", help="Read body text from a file."),
+) -> None:
+    """Ingest a web article you've pasted the body of (stdin by default).
+
+    v1 is deliberately manual: you select the article text, so nav, teasers and
+    footers never reach the extractor and no quote can be attributed to a
+    'related posts' blurb.
+    """
+    from pipeline.ingestors.web import add_web as _add_web
+
+    content = open(file, encoding="utf-8").read() if file else sys.stdin.read()
+    if not content.strip():
+        typer.secho("error: no text provided", fg="red", err=True)
+        raise typer.Exit(1)
+    settings = _settings()
+    conn = _conn(settings)
+    VaultWriter(settings.vault_dir).ensure_layout()
+    h = _add_web(settings, conn, content, url=url, author=author, title=title)
+    if h is None:
+        typer.secho("error: body was empty after normalisation", fg="red", err=True)
+        raise typer.Exit(1)
+    typer.secho(f"ingested {h[:12]}  (stage: {stages.first_stage('web')} ready)", fg="green")
+
+
 @app.command()
 def annotate(
     ref: str = typer.Argument(..., help="Artifact hash (prefix ok) to annotate."),
