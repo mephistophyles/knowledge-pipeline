@@ -42,3 +42,20 @@ def nearest(conn: sqlite3.Connection, vec_table: str, embedding: list[float], k:
         f"SELECT item_id, distance FROM {vec_table} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
         (_serialize(embedding), k),
     ).fetchall()
+
+
+def get_vector(conn: sqlite3.Connection, vec_table: str, item_id: str) -> list[float] | None:
+    """Read a stored embedding back out.
+
+    Retroactive grooming re-queries the index with vectors that were computed at
+    ingest, so a corpus-wide pass costs confirm calls only — never re-embedding.
+    """
+    try:
+        row = conn.execute(
+            f"SELECT embedding FROM {vec_table} WHERE item_id=?", (item_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:  # table not created yet
+        return None
+    if row is None or row["embedding"] is None:
+        return None
+    return list(struct.unpack(f"{len(row['embedding']) // 4}f", row["embedding"]))

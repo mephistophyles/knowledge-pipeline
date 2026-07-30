@@ -46,3 +46,8 @@ def nearest(conn: sqlite3.Connection, embedding: list[float], k: int) -> list[di
         if claim is not None:
             out.append({"claim_id": h["item_id"], "text": claim["text"], "distance": h["distance"]})
     return out
+
+
+def get_vector(conn: sqlite3.Connection, claim_id: str) -> list[float] | None:
+    """The embedding stored for a claim at ingest (used by retroactive grooming)."""
+    return vec_index.get_vector(conn, _VEC, claim_id)

@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS claims (
   source_url    TEXT,
   model         TEXT,
   attestations  INTEGER NOT NULL DEFAULT 1,          -- corroborating sources (incl. origin)
+  merged_into   TEXT,                                -- set when groomed into another claim;
+                                                     -- the row is KEPT so a merge is reversible
   created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 

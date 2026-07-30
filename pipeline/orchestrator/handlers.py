@@ -163,7 +163,8 @@ def dedup(ctx: StageContext) -> str:
         if matched_id:
             # Author-aware: a repeat from an author already attesting this claim is
             # emphasis, not corroboration — merge silently without bumping the count.
-            if _append_attestation(ctx, matched_id, _attestation(ctx, quote, key.get("model"))):
+            # `text` is passed so the absorbed phrasing is preserved, not discarded.
+            if _append_attestation(ctx, matched_id, _attestation(ctx, quote, key.get("model")), text):
                 attested.append(matched_id)
         else:
             claim_id = f"claim-{ctx.artifact_hash[:8]}-{i:02d}"
@@ -234,26 +235,57 @@ def _claim_body(text: str, attestations: list[dict]) -> str:
     return body
 
 
-def _append_attestation(ctx: StageContext, claim_id: str, attestation: dict) -> bool:
+def _append_attestation(
+    ctx: StageContext, claim_id: str, attestation: dict, phrasing: str | None = None
+) -> bool:
     """Append a cross-author attestation. Returns True if it counted as corroboration,
-    False if the author already attests this claim (within-author repetition → skipped)."""
+    False if the author already attests this claim (within-author repetition → skipped).
+
+    A merge is ADDITIVE. `phrasing` is the absorbed claim's own wording, recorded on the
+    surviving note so merging never destroys how the second source put it — previously
+    only the supporting quote survived and the rephrasing was lost for good. That
+    asymmetry is why merging felt risky: a duplicate is a grooming task, but a lost
+    phrasing is unrecoverable.
+    """
     relpath = f"corpus/claims/{claim_id}.md"
     post = read_note(ctx.vault.root / relpath)
     meta = dict(post.metadata)
     existing = list(meta.get("attestations") or [])
     author = attestation.get("author")
-    if author is not None and any(a.get("author") == author for a in existing):
-        return False  # same author already recorded — emphasis, not corroboration
-    meta["attestations"] = existing + [attestation]
+    duplicate_author = author is not None and any(a.get("author") == author for a in existing)
+
     content = post.content.rstrip()
-    line = _attestation_line(attestation)
-    if "## Attestations" in content:
-        content = f"{content}\n{line}\n"
-    else:
-        content = f"{content}\n\n## Attestations\n\n{line}\n"
+    if phrasing and phrasing.strip():
+        alts = list(meta.get("alternate_phrasings") or [])
+        if phrasing.strip() not in alts and phrasing.strip() != _claim_headline(content):
+            alts.append(phrasing.strip())
+            meta["alternate_phrasings"] = alts
+            content = _append_section(content, "## Alternate phrasings", f"- {phrasing.strip()}")
+
+    if not duplicate_author:
+        meta["attestations"] = existing + [attestation]
+        content = _append_section(content, "## Attestations", _attestation_line(attestation))
+
     ctx.vault.write_note(relpath, meta, content)
+    if duplicate_author:
+        return False  # same author already recorded — emphasis, not corroboration
     claims_index.bump_attestation(ctx.conn, claim_id)
     return True
+
+
+def _claim_headline(content: str) -> str:
+    first = (content.strip().splitlines() or [""])[0]
+    return re.sub(r"^#\s*", "", first).strip()
+
+
+def _append_section(content: str, heading: str, line: str) -> str:
+    """Append `line` under `heading`, creating the section if absent."""
+    content = content.rstrip()
+    if heading in content:
+        head, _, tail = content.partition(heading)
+        body, sep, rest = tail.partition("\n## ")
+        return f"{head}{heading}{body.rstrip()}\n{line}\n{sep}{rest}" if sep else f"{content}\n{line}\n"
+    return f"{content}\n\n{heading}\n\n{line}\n"
 
 
 def entities(ctx: StageContext) -> str:

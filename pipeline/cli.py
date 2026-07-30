@@ -262,6 +262,74 @@ def backlog_status() -> None:
             typer.secho(f"  {r['stage']:<16}{r['status']:<9}{r['n']}", fg=colour)
 
 
+@app.command("groom")
+def groom(
+    author: Optional[str] = typer.Option(None, "--author", help="Limit to one author's claims."),
+    max_distance: Optional[float] = typer.Option(
+        None, "--max-distance", help="Override the config threshold for this pass."
+    ),
+    apply: bool = typer.Option(False, "--apply", help="Apply the merges (default: dry run)."),
+    out: Optional[str] = typer.Option(None, "--out", help="Save the plan to a JSON file."),
+    plan_file: Optional[str] = typer.Option(
+        None, "--plan", help="Apply a saved plan instead of re-running the (slow) pass."
+    ),
+) -> None:
+    """Retroactively dedup claims ALREADY in the vault. Dry run unless --apply.
+
+    Nothing is deleted: the survivor gains the absorbed claim's wording and
+    attestations, and the absorbed note moves to corpus/claims/merged/ marked
+    `merged_into`, so every merge is reversible.
+    """
+    from pipeline import corpus_dedup
+
+    settings = _settings()
+    conn = _conn(settings)
+
+    if plan_file:  # review already happened — apply what was reviewed, don't re-plan
+        plan = corpus_dedup.Plan.load(plan_file)
+        typer.secho(f"loaded {len(plan.pairs)} merge(s) from {plan_file}", bold=True)
+        if not apply:
+            typer.secho("pass --apply to commit them.", fg="yellow")
+            return
+        n = corpus_dedup.apply_merges(settings, conn, plan)
+        typer.secho(f"merged {n} claim(s); absorbed notes kept under {corpus_dedup.MERGED_DIR}/", fg="green")
+        return
+
+    thr = settings.dedup_config["max_distance"] if max_distance is None else max_distance
+    if thr < 0:
+        typer.secho(
+            f"dedup max_distance is {thr} (OFF) — nothing can match. Pass --max-distance 0.72",
+            fg="red", err=True,
+        )
+        raise typer.Exit(1)
+
+    def _tick(p):
+        typer.echo(f"  … examined {p.examined}, {len(p.pairs)} merge(s) found, {p.confirms} confirms")
+
+    plan = corpus_dedup.plan_merges(
+        settings, conn, max_distance=max_distance, author=author, progress=_tick
+    )
+    if out:  # save BEFORE printing: planning is the hour, applying is instant
+        typer.secho(f"plan saved → {plan.save(out)}", fg="cyan")
+    typer.secho(
+        f"\nexamined {plan.examined} claim(s) at max_distance={thr} — "
+        f"{len(plan.pairs)} merge(s), {plan.confirms} confirm call(s)", bold=True,
+    )
+    for survivor, absorbed, dist in plan.pairs[:25]:
+        s = conn.execute("SELECT text FROM claims WHERE claim_id=?", (survivor,)).fetchone()
+        a = conn.execute("SELECT text FROM claims WHERE claim_id=?", (absorbed,)).fetchone()
+        typer.echo(f"\n  [{dist:.3f}] keep {survivor}\n    ✓ {(s['text'] or '')[:100]}")
+        typer.echo(f"          absorb {absorbed}\n    ↳ {(a['text'] or '')[:100]}")
+    if len(plan.pairs) > 25:
+        typer.echo(f"\n  … and {len(plan.pairs) - 25} more")
+
+    if not apply:
+        typer.secho("\ndry run — nothing written. re-run with --apply to commit.", fg="yellow")
+        return
+    n = corpus_dedup.apply_merges(settings, conn, plan)
+    typer.secho(f"merged {n} claim(s); absorbed notes kept under corpus/claims/merged/", fg="green")
+
+
 # ── workers / scheduler ───────────────────────────────────────────────────────
 @app.command()
 def worker(
