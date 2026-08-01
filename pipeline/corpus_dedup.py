@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from pipeline import authors
 from pipeline.config import Settings
 from pipeline.db import claims_index, costs
 from pipeline.llm import Message, prompts, registry
@@ -251,6 +252,49 @@ def plan_merges(
     return plan
 
 
+def _voice(conn: sqlite3.Connection, att: dict) -> str | None:
+    """Who is speaking, for corroboration purposes.
+
+    The identity when known, else the raw channel key. Provisional attestations return
+    None so they are excluded from the count entirely — an unmapped channel cannot vouch.
+    """
+    if att.get("provisional"):
+        return None
+    return att.get("identity") or authors.identity_of(conn, att.get("author")) or att.get("author")
+
+
+def recount_attestations(
+    settings: Settings, conn: sqlite3.Connection, *, dry_run: bool = False
+) -> list[tuple[str, int, int]]:
+    """Recompute every live claim's corroboration as its number of DISTINCT VOICES.
+
+    Grooming counted attestation ENTRIES, so one writer restating a point across editions
+    inflated the count. Attestation entries are left alone — they are provenance, and the
+    merges that produced them were correct — only the number is corrected. Returns the
+    claims whose count changed, as (claim_id, before, after).
+    """
+    vault = VaultWriter(settings.vault_dir)
+    changed: list[tuple[str, int, int]] = []
+    for row in conn.execute(
+        "SELECT claim_id, attestations FROM claims WHERE merged_into IS NULL"
+    ).fetchall():
+        path = vault.root / f"corpus/claims/{row['claim_id']}.md"
+        if not path.exists():
+            continue
+        atts = read_note(path).metadata.get("attestations") or []
+        voices = {v for v in (_voice(conn, a) for a in atts) if v}
+        after = max(1, len(voices))
+        if after != row["attestations"]:
+            if not dry_run:
+                conn.execute(
+                    "UPDATE claims SET attestations=? WHERE claim_id=?", (after, row["claim_id"])
+                )
+            changed.append((row["claim_id"], row["attestations"], after))
+    if not dry_run:
+        conn.commit()
+    return changed
+
+
 def apply_merges(settings: Settings, conn: sqlite3.Connection, plan: Plan) -> int:
     """Apply a plan. Additive and reversible — nothing is deleted."""
     vault = VaultWriter(settings.vault_dir)
@@ -270,10 +314,19 @@ def apply_merges(settings: Settings, conn: sqlite3.Connection, plan: Plan) -> in
         s_meta["alternate_phrasings"] = alts
 
         s_atts = list(s_meta.get("attestations") or [])
+        # Keyed by (author, source_hash) so the same writer's OTHER edition is kept as
+        # provenance — a merge must not silently drop where a claim was also made.
         known = {(a.get("author"), a.get("source_hash")) for a in s_atts}
         added = [a for a in (absorbed_note.metadata.get("attestations") or [])
                  if (a.get("author"), a.get("source_hash")) not in known]
         s_meta["attestations"] = s_atts + added
+
+        # Corroboration counts VOICES, not entries. Keying the count on source_hash too
+        # made one author restating a point across five editions read as five independent
+        # sources — the within-author repetition that author-aware attestation exists to
+        # suppress, reintroduced through the grooming path.
+        known_voices = {_voice(conn, a) for a in s_atts}
+        new_voices = {_voice(conn, a) for a in added} - known_voices - {None}
         s_meta.setdefault("merged_from", []).append(absorbed_id)
 
         body = survivor.content.rstrip()
@@ -291,7 +344,8 @@ def apply_merges(settings: Settings, conn: sqlite3.Connection, plan: Plan) -> in
         # The survivor stays live and only gains corroboration; ONLY the absorbed row
         # is marked, which is what stops it matching again.
         conn.execute(
-            "UPDATE claims SET attestations=attestations+? WHERE claim_id=?", (len(added), survivor_id)
+            "UPDATE claims SET attestations=attestations+? WHERE claim_id=?",
+            (len(new_voices), survivor_id),
         )
         conn.execute("UPDATE claims SET merged_into=? WHERE claim_id=?", (survivor_id, absorbed_id))
         applied += 1

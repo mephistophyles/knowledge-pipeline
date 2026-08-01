@@ -474,6 +474,137 @@ def release(ref: str = typer.Argument(..., help="Release a held artifact.")) -> 
     typer.secho(f"released {h[:12]} ({n} stage row(s))", fg="green")
 
 
+@app.command("recount")
+def recount(
+    apply_: bool = typer.Option(False, "--apply", help="Write the corrected counts."),
+) -> None:
+    """Recompute corroboration as the number of DISTINCT VOICES per claim.
+
+    Grooming counted attestation ENTRIES, so one writer restating a point across editions
+    read as several independent sources. Attestation entries are left alone — they are
+    provenance and the merges were correct — only the number is corrected.
+    """
+    from pipeline import corpus_dedup
+
+    settings = _settings()
+    conn = _conn(settings)
+    changed = corpus_dedup.recount_attestations(settings, conn, dry_run=not apply_)
+
+    if not changed:
+        typer.secho("every claim's corroboration already counts distinct voices", fg="green")
+        return
+    inflated = sum(1 for _, b, a in changed if a < b)
+    typer.secho(f"{len(changed)} claim(s) change; {inflated} were inflated", fg="yellow", bold=True)
+    for claim_id, before, after in sorted(changed, key=lambda c: c[1] - c[2], reverse=True)[:25]:
+        typer.echo(f"  {claim_id:<28} {before} → {after}")
+    if not apply_:
+        typer.secho("\ndry run — re-run with --apply to write these", fg="cyan")
+
+
+identity_app = typer.Typer(help="Author identity: map channels to the people who write them.")
+app.add_typer(identity_app, name="identity")
+
+
+@identity_app.command("harvest")
+def identity_harvest(
+    apply_: bool = typer.Option(False, "--apply", help="Write proposals to the table (unconfirmed)."),
+) -> None:
+    """Propose identities from the archived .eml display names. Dry run unless --apply."""
+    from pipeline import identity_seed
+
+    settings = _settings()
+    conn = _conn(settings)
+    props = identity_seed.harvest(settings, conn)
+    people = [p for p in props if p.person]
+    unknown = [p for p in props if not p.person]
+
+    typer.secho(f"\n{len(people)} person proposal(s):", bold=True, fg="green")
+    for p in sorted(people, key=lambda x: -x.editions):
+        typer.echo(f"  {p.person:<28} {p.alias:<44} ({p.editions:>4}) {p.reason}")
+    typer.secho(f"\n{len(unknown)} need(s) a human — the writer is not in the header:", bold=True, fg="yellow")
+    for p in sorted(unknown, key=lambda x: -x.editions):
+        typer.echo(f"  {(p.display or '—'):<28} {p.alias:<44} ({p.editions:>4}) {p.reason}")
+
+    if apply_:
+        n = identity_seed.apply(conn, props)
+        typer.secho(f"\nwrote {n} proposed alias(es); confirm with `pipeline identity confirm`", fg="green")
+    else:
+        typer.secho("\ndry run — re-run with --apply to write these as proposals", fg="cyan")
+
+
+@identity_app.command("list")
+def identity_list(
+    proposed: bool = typer.Option(False, "--proposed", help="Only unconfirmed rows."),
+) -> None:
+    """Show the identity table."""
+    settings = _settings()
+    conn = _conn(settings)
+    sql = (
+        "SELECT a.alias, a.confidence, i.identity_id, i.display_name, i.kind "
+        "FROM identity_aliases a JOIN identities i USING(identity_id)"
+    )
+    if proposed:
+        sql += " WHERE a.confidence='proposed'"
+    rows = conn.execute(sql + " ORDER BY i.display_name").fetchall()
+    if not rows:
+        typer.echo("no identities yet — run `pipeline identity harvest --apply`")
+        return
+    for r in rows:
+        mark = "✓" if r["confidence"] == "curated" else "?"
+        typer.echo(f" {mark} {r['display_name']:<28} {r['kind']:<7} {r['alias']:<44} {r['identity_id']}")
+
+
+@identity_app.command("set")
+def identity_set(
+    alias: str = typer.Argument(..., help="Channel key: an email, hostname, or byline."),
+    name: str = typer.Argument(..., help="The writer's name (or the organisation's)."),
+    kind: str = typer.Option("person", "--kind", help="person | org"),
+    identity_id: Optional[str] = typer.Option(None, "--id", help="Attach to an existing identity id."),
+) -> None:
+    """Map a channel to a person (or org) and mark it curated.
+
+    Use the same `--id` for every channel one writer publishes through — that is what
+    stops their email and their site reading as two independent sources.
+    """
+    from pipeline import authors as A
+
+    settings = _settings()
+    conn = _conn(settings)
+    ident = identity_id or f"{kind}:{A.slug(name)}"
+    A.upsert_identity(conn, ident, name, kind=kind)
+    A.add_alias(conn, alias, ident, confidence="curated", source="manual")
+    conn.commit()
+    typer.secho(f"{alias} → {ident} ({name}) [curated]", fg="green")
+
+
+@identity_app.command("confirm")
+def identity_confirm(
+    alias: Optional[str] = typer.Argument(None, help="Alias to confirm; omit with --all."),
+    all_: bool = typer.Option(False, "--all", help="Confirm every proposal for a person (never orgs)."),
+) -> None:
+    """Promote proposals to curated, so they can carry corroboration."""
+    from pipeline import authors as A
+
+    settings = _settings()
+    conn = _conn(settings)
+    if all_:
+        rows = conn.execute(
+            "SELECT a.alias FROM identity_aliases a JOIN identities i USING(identity_id) "
+            "WHERE a.confidence='proposed' AND i.kind='person'"
+        ).fetchall()
+        for r in rows:
+            A.confirm(conn, r["alias"])
+        conn.commit()
+        typer.secho(f"confirmed {len(rows)} person alias(es); orgs left for review", fg="green")
+        return
+    if not alias:
+        typer.secho("give an alias, or --all", fg="red")
+        raise typer.Exit(1)
+    ok = A.confirm(conn, alias)
+    conn.commit()
+    typer.secho(f"confirmed {alias}" if ok else f"unknown alias {alias}", fg="green" if ok else "red")
+
+
 @app.command("retract")
 def retract_cmd(
     ref: str = typer.Argument(..., help="Artifact whose claims should be withdrawn."),
