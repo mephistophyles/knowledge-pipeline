@@ -2,7 +2,7 @@
 withdraw the previous pass rather than write on top of it."""
 import pytest
 
-from pipeline import corpus_dedup, retract
+from pipeline import authors, corpus_dedup, retract
 from pipeline.db import claims_index as ci
 from pipeline.ingestors.paste import add_paste
 from pipeline.orchestrator.executor import run_stage
@@ -48,6 +48,10 @@ def test_retract_detaches_attestations_it_left_elsewhere(settings, conn, fake_cl
     """A withdrawn source must stop corroborating, or it keeps inflating support for a
     claim it no longer makes."""
     fake_claims["vector"] = [1, 0, 0, 0, 0, 0, 0, 0]
+    for key, person in (("https://a", "Writer A"), ("https://b", "Writer B")):
+        ident = f"person:{authors.slug(person)}"
+        authors.upsert_identity(conn, ident, person)
+        authors.add_alias(conn, key, ident, confidence="curated", source="test")
     a = _source(settings, conn, fake_claims, "source A", "Taste differentiates software.", "q A", "https://a")
     fake_claims["same"] = True
     b = _source(settings, conn, fake_claims, "source B", "Taste sets software apart.", "q B", "https://b")

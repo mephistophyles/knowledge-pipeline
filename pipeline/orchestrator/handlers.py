@@ -220,27 +220,63 @@ def _parse_same(text: str) -> bool:
 
 
 def _author_key(ctx: StageContext) -> str | None:
-    """Identity used to distinguish corroboration (cross-author) from repetition
-    (within-author). Prefers the source's `from` header, normalized by
-    `pipeline.authors` (the same function the backlog batches by); falls back to the
-    source identity when the artifact carries no author at all."""
+    """The CHANNEL a claim arrived through, normalized by `pipeline.authors` (the same
+    function the backlog batches by); falls back to the source identity when the
+    artifact carries no author at all."""
     return authors.author_key((ctx.manifest.extra or {}).get("from")) or ctx.manifest.source_url
 
 
 def _attestation(ctx: StageContext, quote: str, model: str | None) -> dict:
-    return {
+    """Build an attestation, recording both the channel and the person behind it.
+
+    `identity` is the literal writer; `author` stays the channel key so existing notes
+    remain readable and no migration is required. When the channel is unmapped the
+    attestation is `provisional`: it is committed and displayed, but excluded from
+    corroboration, because treating an unknown channel as its own author is exactly how
+    one writer on two channels turns into two sources agreeing with each other.
+    """
+    key = _author_key(ctx)
+    identity = authors.identity_of(ctx.conn, key)
+    att = {
         "source_hash": ctx.artifact_hash,
         "source_url": ctx.manifest.source_url,
-        "author": _author_key(ctx),
+        "author": key,
         "date": date.today().isoformat(),
         "model": model,
         "quote": quote,
     }
+    if identity:
+        att["identity"] = identity
+    else:
+        att["provisional"] = True
+    co = (ctx.manifest.extra or {}).get("co_authors")
+    if co:
+        att["co_authors"] = co  # provenance only; the primary identity drives corroboration
+    return att
+
+
+def _same_voice(conn, a: dict, b: dict) -> bool:
+    """Do two attestations come from the same writer?
+
+    Compares identities when both are known, falling back to the channel key. Legacy
+    notes stored only a channel key, so the stored value is resolved through the identity
+    table at comparison time rather than being rewritten — no migration, and an alias
+    curated later immediately corrects every note that mentions it.
+    """
+    ia = a.get("identity") or authors.identity_of(conn, a.get("author"))
+    ib = b.get("identity") or authors.identity_of(conn, b.get("author"))
+    if ia and ib:
+        return ia == ib
+    return bool(a.get("author")) and a.get("author") == b.get("author")
 
 
 def _attestation_line(a: dict) -> str:
-    who = a.get("author") or a.get("source_url") or "—"
-    return f"- **{who}** `{a['source_hash'][:12]}` — \"{a.get('quote', '')}\" [{a.get('date', '')}]"
+    who = a.get("identity") or a.get("author") or a.get("source_url") or "—"
+    mark = " *(provisional)*" if a.get("provisional") else ""
+    return (
+        f"- **{who}**{mark} `{a['source_hash'][:12]}` — "
+        f"\"{a.get('quote', '')}\" [{a.get('date', '')}]"
+    )
 
 
 def _claim_body(text: str, attestations: list[dict]) -> str:
@@ -266,8 +302,7 @@ def _append_attestation(
     post = read_note(ctx.vault.root / relpath)
     meta = dict(post.metadata)
     existing = list(meta.get("attestations") or [])
-    author = attestation.get("author")
-    duplicate_author = author is not None and any(a.get("author") == author for a in existing)
+    duplicate_author = any(_same_voice(ctx.conn, attestation, a) for a in existing)
 
     content = post.content.rstrip()
     if phrasing and phrasing.strip():
@@ -283,7 +318,9 @@ def _append_attestation(
 
     ctx.vault.write_note(relpath, meta, content)
     if duplicate_author:
-        return False  # same author already recorded — emphasis, not corroboration
+        return False  # same writer already recorded — emphasis, not corroboration
+    if attestation.get("provisional"):
+        return False  # unmapped channel: recorded and visible, but it cannot vouch yet
     claims_index.bump_attestation(ctx.conn, claim_id)
     return True
 

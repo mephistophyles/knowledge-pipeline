@@ -129,3 +129,32 @@ CREATE TABLE IF NOT EXISTS dedup_verdicts (
   at             TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (prompt_version, model, claim_a, claim_b)
 );
+
+-- ── Author identity (web-ingestion-plan.md Part 1) ───────────────────────────
+-- `pipeline.authors.author_key` normalizes a From header to a bare email, which is a
+-- CHANNEL, not a person: `email@stratechery.com` and `stratechery.com` are the same
+-- writer, and the same essay arriving on both would otherwise read as two independent
+-- sources corroborating each other. Identity is anchored to the literal person so that
+-- guest posts, syndication, and multi-author venues attribute to whoever made the claim
+-- rather than to the pipe it arrived through.
+CREATE TABLE IF NOT EXISTS identities (
+  identity_id  TEXT PRIMARY KEY,                     -- 'person:ben-thompson' | 'org:corporate-rebels'
+  display_name TEXT NOT NULL,
+  kind         TEXT NOT NULL DEFAULT 'person',       -- person | org
+  note         TEXT,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Many channel keys resolve to one identity. `confidence` gates use: a 'proposed' row is
+-- a harvest suggestion and is NOT trusted for corroboration until confirmed, because a
+-- wrong merge fuses two real writers into one voice.
+CREATE TABLE IF NOT EXISTS identity_aliases (
+  alias       TEXT PRIMARY KEY,                      -- normalized key: email, hostname, or byline
+  identity_id TEXT NOT NULL REFERENCES identities(identity_id),
+  kind        TEXT,                                  -- email | host | byline
+  confidence  TEXT NOT NULL DEFAULT 'proposed',      -- proposed | curated
+  source      TEXT,                                  -- how we learned it (e.g. 'eml-display-name')
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_alias_identity ON identity_aliases(identity_id);
+CREATE INDEX IF NOT EXISTS idx_alias_confidence ON identity_aliases(confidence);

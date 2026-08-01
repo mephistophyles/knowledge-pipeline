@@ -1,6 +1,7 @@
 """Dedup + attestations (plan §6.3), driven by a fake embed+confirm provider and a
 real sqlite-vec index: a corroborating source attests to an existing claim rather
 than duplicating it; a distinct claim gets its own note."""
+from pipeline import authors
 from pipeline.db import claims_index as ci
 from pipeline.ingestors.email import ingest_message
 from pipeline.ingestors.paste import add_paste
@@ -13,6 +14,19 @@ from .conftest import FakeMsg
 def _walk(settings, conn, h):
     for stage in ("source_note", "extract_claims", "dedup"):
         run_stage(settings, conn, h, stage)
+
+
+def _identify(conn, key, person, kind="person"):
+    """Map a channel key to a curated identity.
+
+    Corroboration now requires knowing WHO wrote something: an unmapped channel yields a
+    provisional attestation that cannot vouch for a claim. Tests about cross-author
+    corroboration therefore have to say who the authors are.
+    """
+    ident = f"{kind}:{authors.slug(person)}"
+    authors.upsert_identity(conn, ident, person, kind=kind)
+    authors.add_alias(conn, key, ident, kind="email", confidence="curated", source="test")
+    return ident
 
 
 def _edition(settings, conn, fake_claims, *, author, body, claim, quote):
@@ -51,6 +65,8 @@ def test_claims_index_add_is_an_upsert(conn):
 # ── attestation vs new note ───────────────────────────────────────────────────
 def test_corroborating_source_attests_not_duplicates(settings, conn, fake_claims):
     fake_claims["vector"] = [1, 0, 0, 0, 0, 0, 0, 0]  # every claim embeds identically → near
+    _identify(conn, "https://a", "Writer A")
+    _identify(conn, "https://b", "Writer B")
 
     fake_claims["text"] = '[{"claim": "Taste differentiates software.", "quote": "taste A"}]'
     a = add_paste(settings, conn, "source A", source_url="https://a")
@@ -112,6 +128,8 @@ def test_same_author_repeating_is_emphasis_not_corroboration(settings, conn, fak
 def test_distinct_authors_corroborate(settings, conn, fake_claims):
     fake_claims["vector"] = [1, 0, 0, 0, 0, 0, 0, 0]
     fake_claims["same"] = True
+    _identify(conn, "first@substack.com", "First Writer")
+    _identify(conn, "second@example.com", "Second Writer")
 
     a = _edition(
         settings, conn, fake_claims, author="first@substack.com",
