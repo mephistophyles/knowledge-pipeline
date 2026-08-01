@@ -157,7 +157,10 @@ def dedup(ctx: StageContext) -> str:
                 provider=verdict.provider, latency_ms=verdict.latency_ms,
             )
             if _parse_same(verdict.text):
-                matched_id = m["claim_id"]
+                # A groomed-away claim keeps its vector, so the shortlist can return one
+                # whose note now lives under `merged/`; the attestation goes to whichever
+                # claim absorbed it.
+                matched_id = claims_index.resolve_live(ctx.conn, m["claim_id"])
                 break
 
         if matched_id:

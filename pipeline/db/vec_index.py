@@ -27,9 +27,19 @@ def ensure(conn: sqlite3.Connection, vec_table: str, dim: int) -> None:
 
 
 def add(conn: sqlite3.Connection, vec_table: str, item_id: str, embedding: list[float]) -> None:
+    """Upsert one vector.
+
+    vec0 parses `INSERT OR REPLACE` but does not honour it — the conflict clause
+    is dropped and the write raises `UNIQUE constraint failed on <table> primary
+    key` instead of replacing. Since claim_ids are deterministic (`claim-<source>
+    -NN`), re-deriving any artifact that already produced claims re-uses its ids,
+    so the upsert has to be spelled out as delete-then-insert or every reprocess
+    dies in dedup.
+    """
     ensure(conn, vec_table, len(embedding))
+    conn.execute(f"DELETE FROM {vec_table} WHERE item_id=?", (item_id,))
     conn.execute(
-        f"INSERT OR REPLACE INTO {vec_table}(item_id, embedding) VALUES(?,?)",
+        f"INSERT INTO {vec_table}(item_id, embedding) VALUES(?,?)",
         (item_id, _serialize(embedding)),
     )
 

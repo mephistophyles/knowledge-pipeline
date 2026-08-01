@@ -48,6 +48,26 @@ def nearest(conn: sqlite3.Connection, embedding: list[float], k: int) -> list[di
     return out
 
 
+def resolve_live(conn: sqlite3.Connection, claim_id: str) -> str:
+    """Follow `merged_into` to the surviving claim.
+
+    Grooming keeps an absorbed claim's row AND its vector on purpose (the merge stays
+    reversible), so a KNN shortlist can still return a claim whose note has moved to
+    `corpus/claims/merged/`. Attesting to it would write to a path that no longer
+    exists; the attestation belongs on the survivor, which grooming already judged to
+    be the same claim. Returns `claim_id` unchanged when nothing was merged.
+    """
+    seen = {claim_id}
+    current = claim_id
+    while True:
+        row = conn.execute("SELECT merged_into FROM claims WHERE claim_id=?", (current,)).fetchone()
+        nxt = row["merged_into"] if row is not None else None
+        if not nxt or nxt in seen:  # terminal, or a cycle we refuse to spin on
+            return current
+        seen.add(nxt)
+        current = nxt
+
+
 def get_vector(conn: sqlite3.Connection, claim_id: str) -> list[float] | None:
     """The embedding stored for a claim at ingest (used by retroactive grooming)."""
     return vec_index.get_vector(conn, _VEC, claim_id)
