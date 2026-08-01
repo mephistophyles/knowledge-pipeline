@@ -36,6 +36,18 @@ def test_claims_index_nearest_empty_before_any_insert(conn):
     assert ci.nearest(conn, [1.0, 0.0, 0.0], 5) == []
 
 
+def test_claims_index_add_is_an_upsert(conn):
+    """vec0 parses `INSERT OR REPLACE` but drops the conflict clause, so re-adding a
+    claim_id used to raise instead of replacing. claim_ids are deterministic, so that
+    made every re-derivation die in dedup."""
+    ci.add_claim(conn, "c1", "h1", "alpha", None, "m", [1.0, 0.0, 0.0])
+    ci.add_claim(conn, "c1", "h1", "alpha revised", None, "m", [0.0, 1.0, 0.0])
+
+    res = ci.nearest(conn, [0.0, 1.0, 0.0], 5)
+    assert [r["claim_id"] for r in res] == ["c1"]  # one row, not two
+    assert res[0]["distance"] < 0.1  # holding the NEW vector
+
+
 # ── attestation vs new note ───────────────────────────────────────────────────
 def test_corroborating_source_attests_not_duplicates(settings, conn, fake_claims):
     fake_claims["vector"] = [1, 0, 0, 0, 0, 0, 0, 0]  # every claim embeds identically → near

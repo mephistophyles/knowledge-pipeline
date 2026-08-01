@@ -27,11 +27,27 @@ def ensure(conn: sqlite3.Connection, vec_table: str, dim: int) -> None:
 
 
 def add(conn: sqlite3.Connection, vec_table: str, item_id: str, embedding: list[float]) -> None:
+    """Upsert one vector.
+
+    vec0 parses `INSERT OR REPLACE` but does not honour it — the conflict clause
+    is dropped and the write raises `UNIQUE constraint failed on <table> primary
+    key` instead of replacing. Since claim_ids are deterministic (`claim-<source>
+    -NN`), re-deriving any artifact that already produced claims re-uses its ids,
+    so the upsert has to be spelled out as delete-then-insert or every reprocess
+    dies in dedup.
+    """
     ensure(conn, vec_table, len(embedding))
+    conn.execute(f"DELETE FROM {vec_table} WHERE item_id=?", (item_id,))
     conn.execute(
-        f"INSERT OR REPLACE INTO {vec_table}(item_id, embedding) VALUES(?,?)",
+        f"INSERT INTO {vec_table}(item_id, embedding) VALUES(?,?)",
         (item_id, _serialize(embedding)),
     )
+
+
+def remove(conn: sqlite3.Connection, vec_table: str, item_id: str) -> None:
+    """Drop one vector. No-op if the table doesn't exist yet."""
+    if exists(conn, vec_table):
+        conn.execute(f"DELETE FROM {vec_table} WHERE item_id=?", (item_id,))
 
 
 def nearest(conn: sqlite3.Connection, vec_table: str, embedding: list[float], k: int) -> list[sqlite3.Row]:
@@ -42,3 +58,20 @@ def nearest(conn: sqlite3.Connection, vec_table: str, embedding: list[float], k:
         f"SELECT item_id, distance FROM {vec_table} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
         (_serialize(embedding), k),
     ).fetchall()
+
+
+def get_vector(conn: sqlite3.Connection, vec_table: str, item_id: str) -> list[float] | None:
+    """Read a stored embedding back out.
+
+    Retroactive grooming re-queries the index with vectors that were computed at
+    ingest, so a corpus-wide pass costs confirm calls only — never re-embedding.
+    """
+    try:
+        row = conn.execute(
+            f"SELECT embedding FROM {vec_table} WHERE item_id=?", (item_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:  # table not created yet
+        return None
+    if row is None or row["embedding"] is None:
+        return None
+    return list(struct.unpack(f"{len(row['embedding']) // 4}f", row["embedding"]))

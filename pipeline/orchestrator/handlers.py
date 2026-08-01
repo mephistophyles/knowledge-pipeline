@@ -14,6 +14,7 @@ eval-compare / offline / promote clean, plan invariant 3):
 """
 from __future__ import annotations
 
+import ast
 import json
 import math
 import re
@@ -21,6 +22,7 @@ from datetime import date
 from pathlib import Path
 from typing import Callable
 
+from pipeline import authors
 from pipeline.db import claims_index, costs, entities_index
 from pipeline.llm import Message, gen_key
 from pipeline.llm import prompts, registry
@@ -119,6 +121,18 @@ def dedup(ctx: StageContext) -> str:
     candidates = data.get("claims", [])
     source_id = _source_id(ctx)
 
+    # Claim ids encode extraction position, so committing a second pass on top of a first
+    # reassigns them — rewriting notes other sources attested to and orphaning the tail
+    # when the new pass yields fewer claims. Re-derivation must retract first.
+    prior = ctx.conn.execute(
+        "SELECT COUNT(*) FROM claims WHERE artifact_hash=?", (ctx.artifact_hash,)
+    ).fetchone()[0]
+    if prior:
+        raise RuntimeError(
+            f"{ctx.artifact_hash[:12]} already has {prior} committed claim(s); "
+            f"run `pipeline retract {ctx.artifact_hash[:12]}` before re-deriving"
+        )
+
     emb_cfg = ctx.settings.embeddings_config
     dcfg = ctx.settings.dedup_config
     emb_provider = registry.get_provider(ctx.settings, emb_cfg["provider"])
@@ -155,13 +169,17 @@ def dedup(ctx: StageContext) -> str:
                 provider=verdict.provider, latency_ms=verdict.latency_ms,
             )
             if _parse_same(verdict.text):
-                matched_id = m["claim_id"]
+                # A groomed-away claim keeps its vector, so the shortlist can return one
+                # whose note now lives under `merged/`; the attestation goes to whichever
+                # claim absorbed it.
+                matched_id = claims_index.resolve_live(ctx.conn, m["claim_id"])
                 break
 
         if matched_id:
             # Author-aware: a repeat from an author already attesting this claim is
             # emphasis, not corroboration — merge silently without bumping the count.
-            if _append_attestation(ctx, matched_id, _attestation(ctx, quote, key.get("model"))):
+            # `text` is passed so the absorbed phrasing is preserved, not discarded.
+            if _append_attestation(ctx, matched_id, _attestation(ctx, quote, key.get("model")), text):
                 attested.append(matched_id)
         else:
             claim_id = f"claim-{ctx.artifact_hash[:8]}-{i:02d}"
@@ -203,18 +221,10 @@ def _parse_same(text: str) -> bool:
 
 def _author_key(ctx: StageContext) -> str | None:
     """Identity used to distinguish corroboration (cross-author) from repetition
-    (within-author). Prefers the source's `from` header; normalizes to the bare email
-    (strips display name and substack `+suffix` so one author isn't split)."""
-    raw = ((ctx.manifest.extra or {}).get("from") or "").strip()
-    if not raw:
-        return ctx.manifest.source_url  # fall back to source identity when no author
-    if "<" in raw and ">" in raw:
-        raw = raw[raw.find("<") + 1 : raw.find(">")]
-    email = raw.strip().lower()
-    if "@" in email:
-        local, _, dom = email.partition("@")
-        email = f"{local.split('+')[0]}@{dom}"
-    return email or None
+    (within-author). Prefers the source's `from` header, normalized by
+    `pipeline.authors` (the same function the backlog batches by); falls back to the
+    source identity when the artifact carries no author at all."""
+    return authors.author_key((ctx.manifest.extra or {}).get("from")) or ctx.manifest.source_url
 
 
 def _attestation(ctx: StageContext, quote: str, model: str | None) -> dict:
@@ -240,26 +250,57 @@ def _claim_body(text: str, attestations: list[dict]) -> str:
     return body
 
 
-def _append_attestation(ctx: StageContext, claim_id: str, attestation: dict) -> bool:
+def _append_attestation(
+    ctx: StageContext, claim_id: str, attestation: dict, phrasing: str | None = None
+) -> bool:
     """Append a cross-author attestation. Returns True if it counted as corroboration,
-    False if the author already attests this claim (within-author repetition → skipped)."""
+    False if the author already attests this claim (within-author repetition → skipped).
+
+    A merge is ADDITIVE. `phrasing` is the absorbed claim's own wording, recorded on the
+    surviving note so merging never destroys how the second source put it — previously
+    only the supporting quote survived and the rephrasing was lost for good. That
+    asymmetry is why merging felt risky: a duplicate is a grooming task, but a lost
+    phrasing is unrecoverable.
+    """
     relpath = f"corpus/claims/{claim_id}.md"
     post = read_note(ctx.vault.root / relpath)
     meta = dict(post.metadata)
     existing = list(meta.get("attestations") or [])
     author = attestation.get("author")
-    if author is not None and any(a.get("author") == author for a in existing):
-        return False  # same author already recorded — emphasis, not corroboration
-    meta["attestations"] = existing + [attestation]
+    duplicate_author = author is not None and any(a.get("author") == author for a in existing)
+
     content = post.content.rstrip()
-    line = _attestation_line(attestation)
-    if "## Attestations" in content:
-        content = f"{content}\n{line}\n"
-    else:
-        content = f"{content}\n\n## Attestations\n\n{line}\n"
+    if phrasing and phrasing.strip():
+        alts = list(meta.get("alternate_phrasings") or [])
+        if phrasing.strip() not in alts and phrasing.strip() != _claim_headline(content):
+            alts.append(phrasing.strip())
+            meta["alternate_phrasings"] = alts
+            content = _append_section(content, "## Alternate phrasings", f"- {phrasing.strip()}")
+
+    if not duplicate_author:
+        meta["attestations"] = existing + [attestation]
+        content = _append_section(content, "## Attestations", _attestation_line(attestation))
+
     ctx.vault.write_note(relpath, meta, content)
+    if duplicate_author:
+        return False  # same author already recorded — emphasis, not corroboration
     claims_index.bump_attestation(ctx.conn, claim_id)
     return True
+
+
+def _claim_headline(content: str) -> str:
+    first = (content.strip().splitlines() or [""])[0]
+    return re.sub(r"^#\s*", "", first).strip()
+
+
+def _append_section(content: str, heading: str, line: str) -> str:
+    """Append `line` under `heading`, creating the section if absent."""
+    content = content.rstrip()
+    if heading in content:
+        head, _, tail = content.partition(heading)
+        body, sep, rest = tail.partition("\n## ")
+        return f"{head}{heading}{body.rstrip()}\n{line}\n{sep}{rest}" if sep else f"{content}\n{line}\n"
+    return f"{content}\n\n{heading}\n\n{line}\n"
 
 
 def entities(ctx: StageContext) -> str:
@@ -463,22 +504,70 @@ def _parse_claims(text: str) -> list[dict]:
 
 
 def _extract_json(text: str):
+    """Recover a JSON value from a model response, tolerating the ways models deviate.
+
+    Silent total loss lives here: a response that fails to parse yields zero claims and
+    looks identical to "the source had nothing worth extracting". On a 178-edition run
+    this dropped every claim from 8 editions (4.5%) whose content was perfectly good.
+    Each fallback below corresponds to an observed real failure, in order of frequency.
+    """
     text = (text or "").strip()
     if text.startswith("```"):
-        text = text.strip("`")
-        text = re.sub(r"^json\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"```\s*$", "", text).strip()
     try:
         return json.loads(text)
     except Exception:
         pass
-    # Salvage the outermost array or object embedded in surrounding prose.
-    for open_c, close_c in (("[", "]"), ("{", "}")):
-        i, j = text.find(open_c), text.rfind(close_c)
-        if i != -1 and j > i:
-            try:
-                return json.loads(text[i : j + 1])
-            except Exception:
-                continue
+
+    decoder = json.JSONDecoder()
+
+    # (1) Trailing prose after a valid array — the most common failure. Models append
+    # commentary, often echoing the prompt back ("Return [] only if ..."), and that text
+    # carries its own brackets. Spanning first-'[' to last-']' therefore swallows the
+    # prose and fails; raw_decode stops at the end of the first well-formed value.
+    i = text.find("[")
+    while i != -1:
+        try:
+            return decoder.raw_decode(text[i:])[0]
+        except Exception:
+            i = text.find("[", i + 1)
+
+    # (2) Python-style output: single-quoted strings, which are not valid JSON.
+    start, end = text.find("["), text.rfind("]")
+    if start != -1 and end > start:
+        try:
+            return ast.literal_eval(text[start : end + 1])
+        except Exception:
+            pass
+
+    # (3) Salvage every complete object. Covers a response truncated at the token cap
+    # mid-object, and an array where ONE entry has bad quoting — recovering the other
+    # entries beats losing the whole edition to a single malformed neighbour.
+    salvaged, i = [], text.find("{")
+    while i != -1:
+        try:
+            value, consumed = decoder.raw_decode(text[i:])
+        except Exception:
+            i = text.find("{", i + 1)
+            continue
+        if isinstance(value, dict) and (value.get("claim") or value.get("text")):
+            salvaged.append(value)
+        i = text.find("{", i + consumed)
+    if salvaged:
+        return salvaged
+
+    # (4) Last resort: a wrapper object like {"claims": [...]}.
+    i = text.find("{")
+    while i != -1:
+        try:
+            value = decoder.raw_decode(text[i:])[0]
+        except Exception:
+            i = text.find("{", i + 1)
+            continue
+        if isinstance(value, dict):
+            return value
+        i = text.find("{", i + 1)
     return None
 
 

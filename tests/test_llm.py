@@ -77,3 +77,67 @@ def test_registry_unknown_provider_raises(settings):
 
     with pytest.raises(LLMError):
         registry.get_provider(settings, "nope")
+
+
+def test_empty_choices_raises_legible_error_not_typeerror():
+    """A 200 response carrying an `error` payload and no choices — how OpenRouter
+    reports a throttled free pool — must name the cause, not raise TypeError."""
+    from pipeline.llm.base import LLMError, Message
+
+    class _Resp:
+        choices = None
+        error = {"message": "rate limit exceeded: free-tier pool"}
+        usage = None
+
+    class _Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**_):
+                    return _Resp()
+
+    p = OpenAICompatProvider(name="fake", base_url="http://x", api_key=None)
+    p._client = _Client()
+    with pytest.raises(LLMError) as e:
+        p.complete([Message("system", "s")], "m", {})
+    assert "rate limit exceeded" in str(e.value)
+
+
+# ── claim-parse salvage: every case below is a REAL response that silently
+# produced zero claims on the 178-edition pilot (4.5% of editions) ────────────
+def test_parse_survives_prompt_echoed_after_a_valid_array():
+    """Most common failure: the model appends commentary that itself contains
+    brackets, so first-'[' to last-']' swallows the prose and parses as nothing."""
+    raw = ('[{"claim": "A real claim.", "quote": "a quote"}]\n'
+           'Return [] only if there is genuinely no transferable insight.')
+    assert _parse_claims(raw) == [{"text": "A real claim.", "quote": "a quote"}]
+
+
+def test_parse_accepts_python_style_single_quotes():
+    raw = "[{'claim': 'Single quoted.', 'quote': 'q'}]"
+    assert _parse_claims(raw) == [{"text": "Single quoted.", "quote": "q"}]
+
+
+def test_parse_salvages_siblings_when_one_entry_is_malformed():
+    """One bad entry must not cost the whole edition."""
+    raw = ('[{"claim": "Good one.", "quote": "q1"}, '
+           '{"claim": "Bad one.", "quote": \\"broken escape\\"}, '
+           '{"claim": "Good two.", "quote": "q2"}]')
+    got = [c["text"] for c in _parse_claims(raw)]
+    assert "Good one." in got and "Good two." in got
+
+
+def test_parse_salvages_a_response_truncated_at_the_token_cap():
+    raw = '[{"claim": "Complete.", "quote": "q"}, {"claim": "Cut off mid-ob'
+    assert _parse_claims(raw) == [{"text": "Complete.", "quote": "q"}]
+
+
+def test_parse_still_returns_empty_for_a_genuine_empty_array():
+    """Recovery must not invent claims where the model correctly found none."""
+    assert _parse_claims("[]") == []
+
+
+def test_parse_still_reads_a_wrapper_object():
+    assert _parse_claims('{"claims": [{"claim": "Wrapped.", "quote": "q"}]}') == [
+        {"text": "Wrapped.", "quote": "q"}
+    ]

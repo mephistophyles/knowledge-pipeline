@@ -58,3 +58,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     acols = {r["name"] for r in conn.execute("PRAGMA table_info(artifacts)")}
     if acols and "word_count" not in acols:
         conn.execute("ALTER TABLE artifacts ADD COLUMN word_count INTEGER")
+    # `claims` may predate merged_into (retroactive corpus grooming).
+    ccols = {r["name"] for r in conn.execute("PRAGMA table_info(claims)")}
+    if ccols and "merged_into" not in ccols:
+        conn.execute("ALTER TABLE claims ADD COLUMN merged_into TEXT")

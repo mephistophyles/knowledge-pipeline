@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from pipeline.config import Settings
+from pipeline.db import backlog as bl
 from pipeline.db import bootstrap, connect
 from pipeline.db import controls as ctl
 from pipeline.db import jobs
@@ -33,6 +34,8 @@ eval_app = typer.Typer(help="Eval-compare a stage across model/provider variants
 app.add_typer(eval_app, name="eval")
 registry_app = typer.Typer(help="Artifact registry (dashboard backlog metadata).", no_args_is_help=True)
 app.add_typer(registry_app, name="registry")
+backlog_app = typer.Typer(help="Pre-cutoff email backlog: scan once, then batch locally.", no_args_is_help=True)
+app.add_typer(backlog_app, name="backlog")
 
 
 def _settings() -> Settings:
@@ -91,6 +94,37 @@ def add_paste(
     typer.secho(f"ingested {h[:12]}  (stage: {stages.first_stage(type_)} ready)", fg="green")
 
 
+@add_app.command("web")
+def add_web(
+    url: str = typer.Option(..., "--url", help="Canonical article URL (provenance)."),
+    author: Optional[str] = typer.Option(
+        None, "--author", help="Stable author id for this site (email/handle/name). Defaults to the hostname."
+    ),
+    title: Optional[str] = typer.Option(None, "--title", help="Article title (defaults to the first line)."),
+    file: Optional[str] = typer.Option(None, "--file", "-f", help="Read body text from a file."),
+) -> None:
+    """Ingest a web article you've pasted the body of (stdin by default).
+
+    v1 is deliberately manual: you select the article text, so nav, teasers and
+    footers never reach the extractor and no quote can be attributed to a
+    'related posts' blurb.
+    """
+    from pipeline.ingestors.web import add_web as _add_web
+
+    content = open(file, encoding="utf-8").read() if file else sys.stdin.read()
+    if not content.strip():
+        typer.secho("error: no text provided", fg="red", err=True)
+        raise typer.Exit(1)
+    settings = _settings()
+    conn = _conn(settings)
+    VaultWriter(settings.vault_dir).ensure_layout()
+    h = _add_web(settings, conn, content, url=url, author=author, title=title)
+    if h is None:
+        typer.secho("error: body was empty after normalisation", fg="red", err=True)
+        raise typer.Exit(1)
+    typer.secho(f"ingested {h[:12]}  (stage: {stages.first_stage('web')} ready)", fg="green")
+
+
 @app.command()
 def annotate(
     ref: str = typer.Argument(..., help="Artifact hash (prefix ok) to annotate."),
@@ -128,6 +162,221 @@ def ingest_email(
         typer.secho(f"error: {e}", fg="red", err=True)
         raise typer.Exit(1)
     typer.secho(f"ingested {len(hashes)} email(s) from {label!r}", fg="green")
+
+
+# ── backlog (pre-cutoff seed corpus) ─────────────────────────────────────────
+@backlog_app.command("scan")
+def backlog_scan(
+    label: str = typer.Option(..., "--label", help="Gmail label / IMAP folder to scan."),
+    before: str = typer.Option(..., "--before", help="Cutoff date YYYY-MM-DD; only mail sent BEFORE this."),
+) -> None:
+    """One-time read of the mailbox → raw .eml archive + ledger rows. Ingests nothing.
+
+    Read-only and resumable: re-running skips what's already archived.
+    """
+    from pipeline.ingestors.email import scan_backlog
+
+    settings = _settings()
+    conn = _conn(settings)
+    def _tick(c):
+        typer.echo(f"  … {c['seen']} seen ({c['added']} new, {c['known']} known, {c['duplicate']} dup)")
+    try:
+        counts = scan_backlog(settings, conn, label=label, before=before, progress=_tick)
+    except RuntimeError as e:
+        typer.secho(f"error: {e}", fg="red", err=True)
+        raise typer.Exit(1)
+    typer.secho(
+        f"archived {counts['added']} new ({counts['known']} already known, "
+        f"{counts['duplicate']} duplicate) from {counts['seen']} message(s)", fg="green",
+    )
+
+
+@backlog_app.command("batches")
+def backlog_batches(
+    assign: bool = typer.Option(False, "--assign", help="Assign batch ids to unbatched rows first."),
+    all_triage: bool = typer.Option(False, "--all", help="With --assign, batch regardless of triage decision."),
+) -> None:
+    """List batches (one per author) with progress."""
+    settings = _settings()
+    conn = _conn(settings)
+    if assign:
+        n = bl.assign_batches(conn, only_triage=None if all_triage else "process")
+        typer.secho(f"assigned {n} row(s) to batches", fg="yellow")
+    rows = bl.batches(conn)
+    if not rows:
+        typer.echo("no batches yet — run `pipeline backlog batches --assign`")
+        return
+    typer.secho(f"{'batch':<44}{'total':>7}{'done':>7}{'todo':>7}  range", bold=True)
+    for r in rows:
+        span = f"{(r['first_sent'] or '')[:10]} → {(r['last_sent'] or '')[:10]}"
+        typer.echo(f"{(r['batch_id'] or '')[:43]:<44}{r['total']:>7}{r['ingested'] or 0:>7}{r['pending'] or 0:>7}  {span}")
+
+
+@backlog_app.command("run")
+def backlog_run(
+    batch: Optional[str] = typer.Option(None, "--batch", help="Batch id (author) to ingest; default = any."),
+    limit: int = typer.Option(25, "--limit", help="Max messages to ingest this run."),
+    reprocess: bool = typer.Option(False, "--reprocess", help="Re-derive even if the chain already completed."),
+) -> None:
+    """Derive normalized artifacts for archived messages and queue their chains.
+
+    Queues work only — run `pipeline worker …` to execute it.
+    """
+    from pipeline.ingestors.email import ingest_from_eml
+
+    settings = _settings()
+    conn = _conn(settings)
+    VaultWriter(settings.vault_dir).ensure_layout()
+    rows = bl.pending(conn, batch_id=batch, limit=limit)
+    if not rows:
+        typer.echo("nothing pending" + (f" in batch {batch!r}" if batch else ""))
+        return
+    queued = skipped = 0
+    for row in rows:
+        h = ingest_from_eml(settings, conn, row["eml_hash"], reprocess=reprocess)
+        if h:
+            queued += 1
+        else:
+            skipped += 1
+            typer.secho(f"  skipped (empty body): {(row['subject'] or '')[:60]}", fg="yellow")
+    typer.secho(f"queued {queued} artifact(s)" + (f", skipped {skipped}" if skipped else ""), fg="green")
+
+
+@backlog_app.command("failures")
+def backlog_failures(
+    batch: Optional[str] = typer.Option(None, "--batch", help="Restrict to one batch."),
+    limit: int = typer.Option(50, "--limit"),
+) -> None:
+    """List backlog messages whose chain failed, with the stage and error."""
+    settings = _settings()
+    conn = _conn(settings)
+    rows = bl.failures(conn, batch_id=batch, limit=limit)
+    if not rows:
+        typer.secho("no failed stages in the backlog", fg="green")
+        return
+    for r in rows:
+        typer.secho(f"{r['eml_hash'][:12]}  {r['stage']:<15} attempts={r['attempts']}", fg="red")
+        typer.echo(f"    {(r['author'] or '?')}  {(r['subject'] or '')[:70]}")
+        typer.echo(f"    {(r['error'] or '')[:110]}")
+    typer.echo(f"\n{len(rows)} failed stage(s) — `pipeline backlog retry` to requeue")
+
+
+@backlog_app.command("retry")
+def backlog_retry(
+    batch: Optional[str] = typer.Option(None, "--batch", help="Restrict to one batch."),
+    stage: Optional[str] = typer.Option(None, "--stage", help="Restrict to one stage."),
+) -> None:
+    """Requeue only the failed stages — not the whole batch."""
+    settings = _settings()
+    conn = _conn(settings)
+    n = bl.requeue_failed(conn, batch_id=batch, stage=stage)
+    typer.secho(f"requeued {n} failed stage(s)", fg="yellow" if n else "green")
+
+
+@backlog_app.command("status")
+def backlog_status() -> None:
+    """Ledger summary: archive, triage, and ingest progress."""
+    settings = _settings()
+    conn = _conn(settings)
+    s = bl.summary(conn)
+    if not s["total"]:
+        typer.echo("backlog empty — run `pipeline backlog scan --label … --before …`")
+        return
+    typer.secho(f"{s['total']} message(s) from {s['authors']} author(s)", bold=True)
+    typer.echo(f"  archived {s['archived']}   ingested {s['ingested']}   duplicate {s['duplicate']}   skipped {s['skipped']}")
+    typer.echo(f"  triage: process {s['to_process']}   drop {s['to_drop']}   untriaged {s['untriaged']}")
+    rows = bl.progress(conn)
+    if rows:
+        typer.secho("\nchain progress (ledger rows only):", bold=True)
+        for r in rows:
+            colour = "red" if r["status"] == "failed" else None
+            typer.secho(f"  {r['stage']:<16}{r['status']:<9}{r['n']}", fg=colour)
+
+
+@app.command("groom")
+def groom(
+    author: Optional[str] = typer.Option(None, "--author", help="Limit to one author's claims."),
+    max_distance: Optional[float] = typer.Option(
+        None, "--max-distance", help="Override the config threshold for this pass."
+    ),
+    apply: bool = typer.Option(False, "--apply", help="Apply the merges (default: dry run)."),
+    out: Optional[str] = typer.Option(None, "--out", help="Save the plan to a JSON file."),
+    plan_file: Optional[str] = typer.Option(
+        None, "--plan", help="Apply a saved plan instead of re-running the (slow) pass."
+    ),
+    workers: int = typer.Option(8, "--workers", help="Parallel confirm calls."),
+    prompt_version: Optional[str] = typer.Option(
+        None, "--prompt-version", help="Override the dedup_confirm prompt version (e.g. v3)."
+    ),
+) -> None:
+    """Retroactively dedup claims ALREADY in the vault. Dry run unless --apply.
+
+    Nothing is deleted: the survivor gains the absorbed claim's wording and
+    attestations, and the absorbed note moves to corpus/claims/merged/ marked
+    `merged_into`, so every merge is reversible.
+    """
+    from pipeline import corpus_dedup
+
+    settings = _settings()
+    conn = _conn(settings)
+
+    if plan_file:  # review already happened — apply what was reviewed, don't re-plan
+        plan = corpus_dedup.Plan.load(plan_file)
+        typer.secho(f"loaded {len(plan.pairs)} merge(s) from {plan_file}", bold=True)
+        if not apply:
+            typer.secho("pass --apply to commit them.", fg="yellow")
+            return
+        n = corpus_dedup.apply_merges(settings, conn, plan)
+        typer.secho(f"merged {n} claim(s); absorbed notes kept under {corpus_dedup.MERGED_DIR}/", fg="green")
+        return
+
+    thr = settings.dedup_config["max_distance"] if max_distance is None else max_distance
+    if thr < 0:
+        typer.secho(
+            f"dedup max_distance is {thr} (OFF) — nothing can match. Pass --max-distance 0.72",
+            fg="red", err=True,
+        )
+        raise typer.Exit(1)
+
+    # Confirm calls are independent, so they run in parallel; the greedy planner that
+    # consumes them is order-dependent and stays sequential (off cache, so it's fast).
+    warm = corpus_dedup.warm_cache(
+        settings, conn, max_distance=max_distance, author=author, workers=workers,
+        prompt_version=prompt_version,
+        progress=lambda s: typer.echo(f"  … confirmed {s['done']}/{s['pairs']} pair(s)"),
+    )
+    if warm["pairs"]:
+        typer.secho(
+            f"warmed {warm['done']}/{warm['pairs']} verdict(s)"
+            + (f", {warm['errors']} error(s)" if warm["errors"] else ""), fg="cyan",
+        )
+
+    def _tick(p):
+        typer.echo(f"  … examined {p.examined}, {len(p.pairs)} merge(s) found")
+
+    plan = corpus_dedup.plan_merges(
+        settings, conn, max_distance=max_distance, author=author,
+        prompt_version=prompt_version, progress=_tick,
+    )
+    if out:  # save BEFORE printing: planning is the hour, applying is instant
+        typer.secho(f"plan saved → {plan.save(out)}", fg="cyan")
+    typer.secho(
+        f"\nexamined {plan.examined} claim(s) at max_distance={thr} — "
+        f"{len(plan.pairs)} merge(s), {plan.confirms} confirm call(s)", bold=True,
+    )
+    for survivor, absorbed, dist in plan.pairs[:25]:
+        s = conn.execute("SELECT text FROM claims WHERE claim_id=?", (survivor,)).fetchone()
+        a = conn.execute("SELECT text FROM claims WHERE claim_id=?", (absorbed,)).fetchone()
+        typer.echo(f"\n  [{dist:.3f}] keep {survivor}\n    ✓ {(s['text'] or '')[:100]}")
+        typer.echo(f"          absorb {absorbed}\n    ↳ {(a['text'] or '')[:100]}")
+    if len(plan.pairs) > 25:
+        typer.echo(f"\n  … and {len(plan.pairs) - 25} more")
+
+    if not apply:
+        typer.secho("\ndry run — nothing written. re-run with --apply to commit.", fg="yellow")
+        return
+    n = corpus_dedup.apply_merges(settings, conn, plan)
+    typer.secho(f"merged {n} claim(s); absorbed notes kept under corpus/claims/merged/", fg="green")
 
 
 # ── workers / scheduler ───────────────────────────────────────────────────────
@@ -223,6 +472,44 @@ def release(ref: str = typer.Argument(..., help="Release a held artifact.")) -> 
     h = _resolve(conn, ref)
     n = jobs.release_artifact(conn, h)
     typer.secho(f"released {h[:12]} ({n} stage row(s))", fg="green")
+
+
+@app.command("retract")
+def retract_cmd(
+    ref: str = typer.Argument(..., help="Artifact whose claims should be withdrawn."),
+    rederive: bool = typer.Option(
+        False, "--rederive", help="After retracting, requeue extract_claims so the chain re-runs."
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Skip the confirmation prompt."),
+) -> None:
+    """Withdraw an artifact's claims from the corpus so it can be re-derived cleanly.
+
+    Claim ids encode extraction position, so a second pass committed on top of a first
+    reassigns them. Retract is the inverse of what `dedup` commits: it drops this
+    artifact's claims, detaches the attestations it left on other notes, and unpicks any
+    merges it took part in. Nothing is lost — the vault is a git repo.
+    """
+    from pipeline import retract as retract_mod
+
+    settings = _settings()
+    conn = _conn(settings)
+    h = _resolve(conn, ref)
+    n = conn.execute("SELECT COUNT(*) FROM claims WHERE artifact_hash=?", (h,)).fetchone()[0]
+    if not n:
+        typer.secho(f"{h[:12]} has no committed claims — nothing to retract", fg="yellow")
+    else:
+        if not yes:
+            typer.confirm(f"retract {n} claim(s) from {h[:12]}?", abort=True)
+        report = retract_mod.retract(settings, conn, h)
+        typer.secho(f"retracted {h[:12]}: {report.summary()}", fg="green")
+    if rederive:
+        conn.execute(
+            "UPDATE jobs SET status='ready', attempts=0, error=NULL, updated_at=datetime('now') "
+            "WHERE artifact_hash=? AND stage='extract_claims'",
+            (h,),
+        )
+        conn.commit()
+        typer.secho("requeued extract_claims", fg="green")
 
 
 @app.command()

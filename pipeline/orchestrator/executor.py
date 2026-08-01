@@ -45,5 +45,9 @@ def run_stage(
     nxt = stages.next_stage(source_type, stage)
     if nxt is not None:
         status = "held" if jobs.is_frozen(conn, artifact_hash) else "ready"
-        jobs.insert_job(conn, artifact_hash, nxt, source_type, status=status, input_path=output_path)
+        # reprocess=True: this stage just produced fresh output, so a downstream stage
+        # that already ran did so against stale input and must run again.
+        jobs.insert_job(
+            conn, artifact_hash, nxt, source_type, status=status, input_path=output_path, reprocess=True
+        )
     return StageOutcome(output_path=output_path, next_stage=nxt)
