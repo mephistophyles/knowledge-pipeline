@@ -474,6 +474,44 @@ def release(ref: str = typer.Argument(..., help="Release a held artifact.")) -> 
     typer.secho(f"released {h[:12]} ({n} stage row(s))", fg="green")
 
 
+@app.command("retract")
+def retract_cmd(
+    ref: str = typer.Argument(..., help="Artifact whose claims should be withdrawn."),
+    rederive: bool = typer.Option(
+        False, "--rederive", help="After retracting, requeue extract_claims so the chain re-runs."
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Skip the confirmation prompt."),
+) -> None:
+    """Withdraw an artifact's claims from the corpus so it can be re-derived cleanly.
+
+    Claim ids encode extraction position, so a second pass committed on top of a first
+    reassigns them. Retract is the inverse of what `dedup` commits: it drops this
+    artifact's claims, detaches the attestations it left on other notes, and unpicks any
+    merges it took part in. Nothing is lost — the vault is a git repo.
+    """
+    from pipeline import retract as retract_mod
+
+    settings = _settings()
+    conn = _conn(settings)
+    h = _resolve(conn, ref)
+    n = conn.execute("SELECT COUNT(*) FROM claims WHERE artifact_hash=?", (h,)).fetchone()[0]
+    if not n:
+        typer.secho(f"{h[:12]} has no committed claims — nothing to retract", fg="yellow")
+    else:
+        if not yes:
+            typer.confirm(f"retract {n} claim(s) from {h[:12]}?", abort=True)
+        report = retract_mod.retract(settings, conn, h)
+        typer.secho(f"retracted {h[:12]}: {report.summary()}", fg="green")
+    if rederive:
+        conn.execute(
+            "UPDATE jobs SET status='ready', attempts=0, error=NULL, updated_at=datetime('now') "
+            "WHERE artifact_hash=? AND stage='extract_claims'",
+            (h,),
+        )
+        conn.commit()
+        typer.secho("requeued extract_claims", fg="green")
+
+
 @app.command()
 def retry(
     ref: str = typer.Argument(..., help="Requeue a failed/held job."),

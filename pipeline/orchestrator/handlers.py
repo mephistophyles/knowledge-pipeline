@@ -121,6 +121,18 @@ def dedup(ctx: StageContext) -> str:
     candidates = data.get("claims", [])
     source_id = _source_id(ctx)
 
+    # Claim ids encode extraction position, so committing a second pass on top of a first
+    # reassigns them — rewriting notes other sources attested to and orphaning the tail
+    # when the new pass yields fewer claims. Re-derivation must retract first.
+    prior = ctx.conn.execute(
+        "SELECT COUNT(*) FROM claims WHERE artifact_hash=?", (ctx.artifact_hash,)
+    ).fetchone()[0]
+    if prior:
+        raise RuntimeError(
+            f"{ctx.artifact_hash[:12]} already has {prior} committed claim(s); "
+            f"run `pipeline retract {ctx.artifact_hash[:12]}` before re-deriving"
+        )
+
     emb_cfg = ctx.settings.embeddings_config
     dcfg = ctx.settings.dedup_config
     emb_provider = registry.get_provider(ctx.settings, emb_cfg["provider"])

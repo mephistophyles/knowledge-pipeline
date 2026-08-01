@@ -149,29 +149,6 @@ def test_author_identity_survives_display_name_and_plus_suffix(settings, conn, f
     assert len(post["attestations"]) == 1
 
 
-def test_reprocessing_an_artifact_that_already_produced_claims(settings, conn, fake_claims):
-    """Re-deriving is routine — a raised max_tokens, a new prompt version, a model swap.
-    The second pass re-uses the same deterministic claim_ids, which used to collide in
-    the vec index and abort dedup after extract_claims had already been paid for."""
-    fake_claims["vector"] = [1, 0, 0, 0, 0, 0, 0, 0]
-    fake_claims["text"] = '[{"claim": "Truncated run.", "quote": "q1"}]'
-    h = add_paste(settings, conn, "an edition whose first extraction hit the output cap")
-    _walk(settings, conn, h)
-
-    # Second pass: a fuller extraction from the same source, same claim ids.
-    fake_claims["text"] = (
-        '[{"claim": "Truncated run.", "quote": "q1"},'
-        ' {"claim": "The claim the cap cut off.", "quote": "q2"}]'
-    )
-    fake_claims["same"] = False
-    run_stage(settings, conn, h, "extract_claims")
-    run_stage(settings, conn, h, "dedup")
-
-    assert (settings.vault_dir / f"corpus/claims/claim-{h[:8]}-01.md").exists()
-    rows = conn.execute("SELECT claim_id FROM claims WHERE artifact_hash=?", (h,)).fetchall()
-    assert sorted(r["claim_id"] for r in rows) == [f"claim-{h[:8]}-00", f"claim-{h[:8]}-01"]
-
-
 def test_dedup_records_embed_cost(settings, conn, fake_claims):
     fake_claims["text"] = '[{"claim": "One claim.", "quote": "q"}]'
     h = add_paste(settings, conn, "text")

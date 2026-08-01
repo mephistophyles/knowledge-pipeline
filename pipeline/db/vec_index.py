@@ -44,6 +44,12 @@ def add(conn: sqlite3.Connection, vec_table: str, item_id: str, embedding: list[
     )
 
 
+def remove(conn: sqlite3.Connection, vec_table: str, item_id: str) -> None:
+    """Drop one vector. No-op if the table doesn't exist yet."""
+    if exists(conn, vec_table):
+        conn.execute(f"DELETE FROM {vec_table} WHERE item_id=?", (item_id,))
+
+
 def nearest(conn: sqlite3.Connection, vec_table: str, embedding: list[float], k: int) -> list[sqlite3.Row]:
     """Rows of (item_id, distance), closest first; empty if the table doesn't exist yet."""
     if not exists(conn, vec_table):
