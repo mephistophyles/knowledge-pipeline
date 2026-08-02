@@ -126,6 +126,47 @@ def scan(
     return counts
 
 
+def read_url_list(path: str) -> list[str]:
+    """URLs from a plain list or a CSV export, deduplicated, order preserved.
+
+    Reading lists arrive in whatever shape the source exported — one per line from a
+    scratch file, or a CSV from Pocket/Instapaper/Readwise with a header and extra
+    columns. Rather than making the caller reshape it, take the first cell of each row
+    that looks like a URL and ignore everything else; a header row has no URL in it and
+    drops out for free.
+
+    Deduplicated on the CANONICAL form, so the same article listed twice under different
+    tracking parameters is fetched once.
+    """
+    import csv
+    import io
+
+    from pathlib import Path
+
+    text = Path(path).read_text()
+    urls: list[str] = []
+    for row in csv.reader(io.StringIO(text)):
+        for cell in row:
+            cell = cell.strip().strip('"').strip()
+            if not cell or cell.startswith("#"):
+                continue
+            if cell.lower().startswith(("http://", "https://")):
+                urls.append(cell)
+                break  # one URL per row; later columns are metadata
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for u in urls:
+        try:
+            key = canonicalize(u)
+        except Exception:
+            continue
+        if key not in seen:
+            seen.add(key)
+            out.append(u)
+    return out
+
+
 def escalation_rates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Escalations by cause and month — the evidence for the deferred fetch decision."""
     return conn.execute(

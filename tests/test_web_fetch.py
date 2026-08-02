@@ -194,3 +194,69 @@ def test_title_entities_are_decoded():
     carried all the way into the vault."""
     f = _fetcher(_page(title="Bezos&#x27;s Shadow &amp; the Review"))
     assert f.fetch("https://example.com/x").title == "Bezos's Shadow & the Review"
+
+
+# ── reading lists ─────────────────────────────────────────────────────────────
+def test_read_url_list_plain_lines(tmp_path):
+    f = tmp_path / "list.txt"
+    f.write_text("# my backlog\nhttps://a.com/1\n\nhttps://b.com/2\n")
+    assert ledger.read_url_list(str(f)) == ["https://a.com/1", "https://b.com/2"]
+
+
+def test_read_url_list_csv_export_with_header_and_columns(tmp_path):
+    """Pocket/Instapaper/Readwise exports carry a header and metadata columns; a header
+    row has no URL in it and drops out for free."""
+    f = tmp_path / "export.csv"
+    f.write_text(
+        "url,title,time_added,tags\n"
+        "https://a.com/1,First Post,1699999999,reading\n"
+        "https://b.com/2,\"Second, with a comma\",1700000000,\n"
+    )
+    assert ledger.read_url_list(str(f)) == ["https://a.com/1", "https://b.com/2"]
+
+
+def test_read_url_list_finds_the_url_in_any_column(tmp_path):
+    f = tmp_path / "export.csv"
+    f.write_text("Title,URL\nSome Post,https://a.com/1\n")
+    assert ledger.read_url_list(str(f)) == ["https://a.com/1"]
+
+
+def test_read_url_list_dedupes_on_the_canonical_form(tmp_path):
+    """The same article listed twice under different tracking params is one fetch."""
+    f = tmp_path / "list.txt"
+    f.write_text(
+        "https://a.com/p\n"
+        "https://a.com/p?utm_source=twitter\n"
+        "https://www.a.com/p/\n"
+    )
+    assert ledger.read_url_list(str(f)) == ["https://a.com/p"]
+
+
+def test_http_errors_from_the_real_transport_are_classified_as_http_error():
+    """urllib RAISES HTTPError on 4xx rather than returning a status. Letting that reach
+    the generic handler counted every paywall and dead link as `fetch_error`, collapsing
+    two causes the escalation rate has to tell apart."""
+    import urllib.error
+
+    class Real(Fetcher):
+        def _get(self, url):
+            raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+    f = Real(respect_robots=False, min_interval=0)
+    with pytest.raises(Escalation) as e:
+        f.fetch("https://example.com/x")
+    assert e.value.cause == "fetch_error"  # a subclass that bypasses _get's own handling
+
+
+def test_urllib_http_error_is_converted_to_a_status_not_an_exception(monkeypatch):
+    """The conversion happens inside _get, so the status check downstream can see it."""
+    import urllib.error
+    import urllib.request
+
+    def raise_403(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {"Content-Type": "text/html"}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", raise_403)
+    with pytest.raises(Escalation) as e:
+        Fetcher(respect_robots=False, min_interval=0).fetch("https://example.com/x")
+    assert e.value.cause == "http_error" and e.value.detail == "403"

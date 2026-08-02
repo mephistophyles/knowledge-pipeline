@@ -8,7 +8,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from dotenv import load_dotenv
@@ -527,20 +527,42 @@ def web_add(url: str = typer.Argument(..., help="Article URL.")) -> None:
 
 @web_app.command("scan")
 def web_scan(
-    file: str = typer.Argument(..., help="File of URLs, one per line (# comments allowed)."),
+    urls: Optional[List[str]] = typer.Argument(None, help="URLs to fetch (space-separated)."),
+    file: Optional[str] = typer.Option(
+        None, "--file", "-f", help="File of URLs: one per line, or a CSV export (# comments ok)."
+    ),
     limit: Optional[int] = typer.Option(None, "--limit", help="Stop after N URLs."),
 ) -> None:
-    """Fetch a reading list into the ledger. Escalations are recorded, never fatal."""
+    """Fetch a reading list into the ledger. Escalations are recorded, never fatal.
+
+    Takes URLs directly, a file, or both — a scratch list and an export are the same job.
+    """
     from pipeline.web import ledger
 
     settings = _settings()
     conn = _conn(settings)
-    urls = [
-        ln.strip() for ln in Path(file).read_text().splitlines()
-        if ln.strip() and not ln.strip().startswith("#")
-    ][: limit or None]
+    collected = list(urls or [])
+    if file:
+        collected += ledger.read_url_list(file)
+    if not collected:
+        typer.secho("give URLs, or --file with a list/CSV of them", fg="red")
+        raise typer.Exit(1)
+
+    seen, deduped = set(), []
+    for u in collected:
+        try:
+            key = ledger.canonicalize(u)
+        except Exception:
+            continue
+        if key not in seen:
+            seen.add(key)
+            deduped.append(u)
+    dropped = len(collected) - len(deduped)
+    urls = deduped[: limit or None]
+    if dropped:
+        typer.secho(f"({dropped} duplicate URL(s) collapsed)", fg="cyan")
     if not urls:
-        typer.echo("no URLs in that file")
+        typer.echo("no usable URLs")
         return
     typer.echo(f"fetching {len(urls)} URL(s) — 1 req/s per host, honouring robots.txt\n")
 

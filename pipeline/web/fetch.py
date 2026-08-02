@@ -104,13 +104,24 @@ class Fetcher:
 
     # ── the fetch ─────────────────────────────────────────────────────────────
     def _get(self, url: str):
+        """`(status, headers, body)`.
+
+        urllib RAISES HTTPError on 4xx/5xx instead of returning the status, so it is
+        caught and converted here. Without this every paywall and dead link counted as
+        `fetch_error`, collapsing two things the escalation rate needs to tell apart: a
+        403 is a candidate for the snapshot path, a DNS failure is a broken link.
+        """
         if self._transport is not None:
             return self._transport(url, {"User-Agent": USER_AGENT})
+        import urllib.error
         import urllib.request
 
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.status, dict(resp.headers), resp.read()
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status, dict(resp.headers), resp.read()
+        except urllib.error.HTTPError as e:
+            return e.code, dict(e.headers or {}), e.read() or b""
 
     def fetch(self, url: str) -> Fetched:
         """Fetch one URL, or raise `Escalation` with a countable cause."""
