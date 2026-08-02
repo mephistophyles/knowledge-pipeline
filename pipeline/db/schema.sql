@@ -158,3 +158,43 @@ CREATE TABLE IF NOT EXISTS identity_aliases (
 );
 CREATE INDEX IF NOT EXISTS idx_alias_identity ON identity_aliases(identity_id);
 CREATE INDEX IF NOT EXISTS idx_alias_confidence ON identity_aliases(confidence);
+
+-- ── Web backlog ledger (web-ingestion-plan.md Part 2) ────────────────────────
+-- Same inversion as the email ledger: fetch ONCE into a content-addressed archive, then
+-- page this table forever. Identity is the sha256 of the RAW response bytes, never the
+-- extracted body — the extractor is the component most likely to change, and keying on
+-- its output would turn every extractor tweak into a corpus-wide identity reset.
+CREATE TABLE IF NOT EXISTS web_backlog (
+  fetch_hash    TEXT PRIMARY KEY,                   -- sha256 of raw response bytes
+  url           TEXT NOT NULL,                      -- canonical URL
+  requested_url TEXT,                               -- what we were given, canonicalized
+  fetch_key     TEXT,                               -- blobstore key of the archived response
+  site          TEXT,                               -- hostname; the publication facet
+  title         TEXT,
+  identity_id   TEXT,                               -- resolved author, NULL = unmapped
+  content_type  TEXT,
+  http_status   INTEGER,
+  syndicated_from TEXT,                             -- set when the page declares a cross-site canonical
+  artifact_hash TEXT,                               -- normalized artifact, once extracted
+  triage        TEXT,                               -- process | drop | review | NULL
+  state         TEXT NOT NULL DEFAULT 'archived',   -- archived | ingested | duplicate | escalated
+  escalation    TEXT,                               -- cause, when state='escalated'
+  fetched_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_web_url ON web_backlog(url);
+CREATE INDEX IF NOT EXISTS idx_web_state ON web_backlog(state);
+CREATE INDEX IF NOT EXISTS idx_web_site ON web_backlog(site);
+CREATE INDEX IF NOT EXISTS idx_web_identity ON web_backlog(identity_id);
+
+-- Every exit through the escalation seam, by cause. This table IS the evidence for the
+-- deferred browser-vs-form decision: ~3/month keeps manual paste, ~30/month justifies
+-- building something. Rows are kept even when a URL is later fetched successfully, so the
+-- rate reflects what actually happened rather than what survived.
+CREATE TABLE IF NOT EXISTS web_escalations (
+  url        TEXT NOT NULL,
+  cause      TEXT NOT NULL,
+  detail     TEXT,
+  at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_escalation_cause ON web_escalations(cause);

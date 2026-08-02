@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -499,6 +500,76 @@ def recount(
         typer.echo(f"  {claim_id:<28} {before} → {after}")
     if not apply_:
         typer.secho("\ndry run — re-run with --apply to write these", fg="cyan")
+
+
+web_app = typer.Typer(help="Web backlog: fetch once into an archive, then page the ledger.")
+app.add_typer(web_app, name="web")
+
+
+@web_app.command("add")
+def web_add(url: str = typer.Argument(..., help="Article URL.")) -> None:
+    """Fetch and archive one URL."""
+    from pipeline.web import ledger
+
+    settings = _settings()
+    conn = _conn(settings)
+    r = ledger.add_url(settings, conn, url)
+    if r["state"] == "escalated":
+        typer.secho(f"escalated ({r['cause']}): {r['url']}", fg="yellow")
+        typer.echo(f"  {r['detail']}\n  paste the body by hand: pipeline add web --url {r['url']}")
+        return
+    who = r.get("identity_id") or "UNMAPPED (attestations will be provisional)"
+    typer.secho(f"{r['state']}: {r['url']}", fg="green")
+    typer.echo(f"  title:  {r.get('title') or '—'}\n  author: {who}")
+    if r.get("syndicated_from"):
+        typer.secho(f"  syndicated — page declares a canonical on another site", fg="yellow")
+
+
+@web_app.command("scan")
+def web_scan(
+    file: str = typer.Argument(..., help="File of URLs, one per line (# comments allowed)."),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Stop after N URLs."),
+) -> None:
+    """Fetch a reading list into the ledger. Escalations are recorded, never fatal."""
+    from pipeline.web import ledger
+
+    settings = _settings()
+    conn = _conn(settings)
+    urls = [
+        ln.strip() for ln in Path(file).read_text().splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    ][: limit or None]
+    if not urls:
+        typer.echo("no URLs in that file")
+        return
+    typer.echo(f"fetching {len(urls)} URL(s) — 1 req/s per host, honouring robots.txt\n")
+
+    def show(r):
+        mark = {"archived": "+", "duplicate": "=", "escalated": "!"}.get(r["state"], "?")
+        extra = f" ({r['cause']})" if r["state"] == "escalated" else ""
+        typer.echo(f"  {mark} {r['url'][:90]}{extra}")
+
+    counts = ledger.scan(settings, conn, urls, progress=show)
+    typer.secho(f"\n{counts}", bold=True)
+
+
+@web_app.command("status")
+def web_status() -> None:
+    """Ledger totals, plus the escalation rate the fetch decision depends on."""
+    from pipeline.web import ledger
+
+    settings = _settings()
+    conn = _conn(settings)
+    s = ledger.summary(conn)
+    if not s or not any(v for k, v in s.items() if k != "unmapped_authors"):
+        typer.echo("web ledger is empty — `pipeline web add <url>` or `pipeline web scan <file>`")
+        return
+    typer.secho(f"{s}", bold=True)
+    rates = ledger.escalation_rates(conn)
+    if rates:
+        typer.secho("\nescalations by month (evidence for browser-vs-form):", bold=True)
+        for r in rates:
+            typer.echo(f"  {r['month']}  {r['cause']:<28} {r['n']}")
 
 
 identity_app = typer.Typer(help="Author identity: map channels to the people who write them.")
