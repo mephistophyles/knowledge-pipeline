@@ -163,6 +163,7 @@ identities:
   kind: person
   aliases:
   - pragmaticengineer@substack.com
+  - pragmaticengineer.com
   note: name is recognisable enough
 - id: person:jason-cohen
   name: Jason Cohen

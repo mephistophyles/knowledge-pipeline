@@ -10,7 +10,7 @@ import sqlite3
 
 from pipeline import authors
 from pipeline.config import Settings
-from pipeline.web.canonical import SHARED_PLATFORMS, canonicalize, site_of
+from pipeline.web.canonical import SHARED_PLATFORMS, canonicalize, registrable, site_of
 from pipeline.web.fetch import Escalation, Fetcher, Fetched
 
 
@@ -23,15 +23,24 @@ def record_escalation(conn: sqlite3.Connection, url: str, cause: str, detail: st
 def identity_for(conn: sqlite3.Connection, url: str) -> str | None:
     """Resolve a page's author from its hostname.
 
-    A shared platform host is never consulted: `substack.com` identifies the platform, so
-    resolving through it would make every Substack writer the same author. Those pages
-    stay unmapped until a byline or a curated alias says otherwise, which means their
-    attestations are provisional — the safe direction.
+    Tries the exact host, then its registrable domain: a writer who publishes at
+    `newsletter.example.com` and `example.com` is one writer, and requiring every
+    subdomain to be curated separately would fracture them for no reason.
+
+    A shared platform is never consulted at either level — `substack.com` identifies the
+    platform, so resolving through it would make every Substack writer the same author.
+    Pages that stay unmapped attest provisionally, which is the safe direction.
     """
     host = site_of(url)
     if not host or host in SHARED_PLATFORMS:
         return None
-    return authors.identity_of(conn, host)
+    found = authors.identity_of(conn, host)
+    if found:
+        return found
+    root = registrable(host)
+    if root and root != host and root not in SHARED_PLATFORMS:
+        return authors.identity_of(conn, root)
+    return None
 
 
 def already_have(conn: sqlite3.Connection, *, url: str | None = None, fetch_hash: str | None = None):

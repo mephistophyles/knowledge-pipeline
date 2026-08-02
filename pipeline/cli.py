@@ -553,6 +553,40 @@ def web_scan(
     typer.secho(f"\n{counts}", bold=True)
 
 
+@web_app.command("import")
+def web_import(
+    path: str = typer.Argument(..., help="Saved .html/.mhtml file, or a directory of them."),
+    url: Optional[str] = typer.Option(None, "--url", help="Source URL (wins over what the file records)."),
+    title: Optional[str] = typer.Option(None, "--title", help="Override the page title."),
+) -> None:
+    """Import a locally saved page — no server request, so robots.txt does not apply.
+
+    For pages our fetcher may not request. Saving from the browser involves no additional
+    request at all, which is why this exists rather than a robots override.
+    """
+    from pipeline.web import snapshot
+
+    settings = _settings()
+    conn = _conn(settings)
+    p = Path(path)
+    if p.is_dir():
+        def show(r):
+            mark = {"archived": "+", "duplicate": "=", "failed": "!"}.get(r["state"], "?")
+            typer.echo(f"  {mark} {r['url'][:88]}" + (f"  {r.get('error','')}" if r["state"] == "failed" else ""))
+
+        counts = snapshot.import_dir(settings, conn, p, progress=show)
+        typer.secho(f"\n{counts}", bold=True)
+        return
+    try:
+        r = snapshot.import_file(settings, conn, p, url=url, title=title)
+    except snapshot.SnapshotError as e:
+        typer.secho(f"cannot import: {e}", fg="red")
+        raise typer.Exit(1)
+    who = r.get("identity_id") or "UNMAPPED (attestations will be provisional)"
+    typer.secho(f"{r['state']}: {r['url']}", fg="green")
+    typer.echo(f"  title:  {r.get('title') or '—'}\n  author: {who}\n  url from: {r['resolved_url_from']}")
+
+
 @web_app.command("status")
 def web_status() -> None:
     """Ledger totals, plus the escalation rate the fetch decision depends on."""
@@ -638,12 +672,26 @@ def identity_unmapped() -> None:
         "SELECT b.author, COUNT(*) n FROM backlog b WHERE b.author IS NOT NULL AND b.author NOT IN "
         "(SELECT alias FROM identity_aliases WHERE confidence='curated') GROUP BY b.author ORDER BY n DESC"
     ).fetchall()
-    if not rows:
-        typer.secho("every backlog channel resolves to a curated identity", fg="green")
+    # Web hosts are listed together with email channels: they are the same kind of
+    # decision, and a Substack newsletter publishes on a custom subdomain that never
+    # matches its sending address, so mapping one does not map the other.
+    hosts = conn.execute(
+        "SELECT site, COUNT(*) n FROM web_backlog WHERE identity_id IS NULL AND site IS NOT NULL "
+        "AND state<>'escalated' GROUP BY site ORDER BY n DESC"
+    ).fetchall()
+    if not rows and not hosts:
+        typer.secho("every channel and web host resolves to a curated identity", fg="green")
         return
-    typer.secho(f"{len(rows)} unmapped channel(s):", fg="yellow", bold=True)
-    for r in rows:
-        typer.echo(f"  {r['author']:<48} ({r['n']})")
+    if rows:
+        typer.secho(f"{len(rows)} unmapped email channel(s):", fg="yellow", bold=True)
+        for r in rows:
+            typer.echo(f"  {r['author']:<48} ({r['n']})")
+    if hosts:
+        typer.secho(f"\n{len(hosts)} unmapped web host(s):", fg="yellow", bold=True)
+        for r in hosts:
+            typer.echo(f"  {r['site']:<48} ({r['n']})")
+        typer.echo("\n  link one to an author you already have:")
+        typer.echo("    pipeline identity set <host> '<Name>' --id person:<slug>")
 
 
 @identity_app.command("list")
