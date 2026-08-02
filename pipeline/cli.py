@@ -532,6 +532,38 @@ def identity_harvest(
         typer.secho("\ndry run — re-run with --apply to write these as proposals", fg="cyan")
 
 
+@identity_app.command("sync")
+def identity_sync(
+    path: Optional[str] = typer.Option(None, "--file", help="Curation file (default config/identities.yaml)."),
+) -> None:
+    """Apply config/identities.yaml — the canonical record — as curated mappings."""
+    from pipeline import identity_seed
+
+    settings = _settings()
+    conn = _conn(settings)
+    n_id, n_alias, conflicts = identity_seed.sync(settings, conn, path)
+    typer.secho(f"synced {n_id} identities, {n_alias} aliases (curated)", fg="green")
+    for c in conflicts:
+        typer.secho(f"  CONFLICT (skipped): {c}", fg="red")
+
+
+@identity_app.command("unmapped")
+def identity_unmapped() -> None:
+    """Channel keys in the backlog with no curated identity — what still needs a decision."""
+    settings = _settings()
+    conn = _conn(settings)
+    rows = conn.execute(
+        "SELECT b.author, COUNT(*) n FROM backlog b WHERE b.author IS NOT NULL AND b.author NOT IN "
+        "(SELECT alias FROM identity_aliases WHERE confidence='curated') GROUP BY b.author ORDER BY n DESC"
+    ).fetchall()
+    if not rows:
+        typer.secho("every backlog channel resolves to a curated identity", fg="green")
+        return
+    typer.secho(f"{len(rows)} unmapped channel(s):", fg="yellow", bold=True)
+    for r in rows:
+        typer.echo(f"  {r['author']:<48} ({r['n']})")
+
+
 @identity_app.command("list")
 def identity_list(
     proposed: bool = typer.Option(False, "--proposed", help="Only unconfirmed rows."),

@@ -1,0 +1,317 @@
+# Canonical author identities — the curated record.
+#
+# ONE author = ONE id, however many publications they write through. The sources differ;
+# the author does not. Prefer a person's name where a person is speaking, and the brand
+# where the brand is (a partnership, a rotating byline, a publication whose voice IS the
+# product). Do not fracture a company into its partners: tracking a16z is worth more than
+# tracking each partner separately.
+#
+# `aliases` are channel keys: sending addresses AND web hostnames. Hostnames are listed so
+# that when the same essay arrives by web it resolves to the SAME author and cannot
+# corroborate itself. Shared platforms (substack.com, beehiiv.com, gmail.com) are never
+# aliased — they identify the platform, not the writer.
+#
+# Applied with `pipeline identity sync`, which writes these as CURATED. Harvested
+# proposals are unconfirmed until they appear here.
+identities:
+- id: org:department-of-product
+  name: Department of Product
+  kind: org
+  aliases:
+  - departmentofproduct@substack.com
+  note: brand is the author
+- id: person:ben-thompson
+  name: Ben Thompson
+  kind: person
+  aliases:
+  - email@stratechery.com
+  - stratechery.com
+- id: org:failory
+  name: Failory
+  kind: org
+  aliases:
+  - nico@failory.com
+  - failory.com
+  note: brand, not Nico personally
+- id: person:allan-dib
+  name: Allan Dib
+  kind: person
+  aliases:
+  - allan@leanmarketing.com
+  - leanmarketing.com
+- id: org:the-bottleneck
+  name: The Bottleneck
+  kind: org
+  aliases:
+  - hello@email.thebottleneck.io
+  - thebottleneck.io
+  note: rotates through COOs
+- id: person:eliezer-yudkowsky
+  name: Eliezer Yudkowsky
+  kind: person
+  aliases:
+  - noreply@rationality.devanshshah.dev
+  - rationality.devanshshah.dev
+  note: limited series based on his writings
+- id: person:ali-abdaal
+  name: Ali Abdaal
+  kind: person
+  aliases:
+  - ali@aliabdaal.com
+  - aliabdaal.com
+- id: person:jim-cook
+  name: Jim Cook
+  kind: person
+  aliases:
+  - jcookflix@substack.com
+- id: person:scott-young
+  name: Scott Young
+  kind: person
+  aliases:
+  - newsletter@scotthyoung.com
+  - scotthyoung.com
+- id: person:wes-bush
+  name: Wes Bush
+  kind: person
+  aliases:
+  - wb@productled.com
+  - productled.com
+- id: person:gregor-ojstersek
+  name: Gregor Ojstersek
+  kind: person
+  aliases:
+  - gregorojstersek@substack.com
+- id: person:michael-easter
+  name: Michael Easter
+  kind: person
+  aliases:
+  - michaeleaster@substack.com
+- id: person:cj-gustafson
+  name: CJ Gustafson
+  kind: person
+  aliases:
+  - mostlymetrics@mail.mostlymetrics.com
+  - lookingforleverage@mail.beehiiv.com
+  - mostlymetrics.com
+- id: org:the-founders-corner
+  name: The Founders Corner
+  kind: org
+  aliases:
+  - thefoundercorner@substack.com
+  note: 'DEFAULT: brand pattern — override if wrong'
+- id: person:anne-laure-le-cunff
+  name: Anne-Laure Le Cunff
+  kind: person
+  aliases:
+  - annelaure@nesslabs.com
+  - nesslabs.com
+- id: person:chris-williamson
+  name: Chris Williamson
+  kind: person
+  aliases:
+  - chris@chriswillx.com
+  - chriswillx.com
+- id: person:will-bachman
+  name: Will Bachman
+  kind: person
+  aliases:
+  - will.bachman@umbrex.com
+  - umbrex.com
+- id: org:commoncog
+  name: Commoncog
+  kind: org
+  aliases:
+  - newsletter@commoncog.com
+  - commoncog.com
+  note: Cedric Chin, but the brand is him
+- id: person:john-cutler
+  name: John Cutler
+  kind: person
+  aliases:
+  - cutlefish@substack.com
+- id: person:rex-woodbury
+  name: Rex Woodbury
+  kind: person
+  aliases:
+  - digitalnative@substack.com
+- id: person:chris-reilly
+  name: Chris Reilly
+  kind: person
+  aliases:
+  - chris@financialmodelingeducation.com
+  - financialmodelingeducation.com
+- id: person:harris-fanaroff
+  name: Harris Fanaroff
+  kind: person
+  aliases:
+  - harris-fanaroff-newsletter@mail.beehiiv.com
+  - harris@activateonboarding.com
+  - activateonboarding.com
+- id: person:billy-oppenheimer
+  name: Billy Oppenheimer
+  kind: person
+  aliases:
+  - billy@billyoppenheimer.com
+  - billyoppenheimer.com
+- id: person:david-perell
+  name: David Perell
+  kind: person
+  aliases:
+  - howiwrite@substack.com
+- id: person:gergely-orosz
+  name: Gergely Orosz
+  kind: person
+  aliases:
+  - pragmaticengineer@substack.com
+  note: name is recognisable enough
+- id: person:jason-cohen
+  name: Jason Cohen
+  kind: person
+  aliases:
+  - jason@asmartbear.com
+  - asmartbear.com
+- id: org:corporate-rebels
+  name: Corporate Rebels
+  kind: org
+  aliases:
+  - info@corporate-rebels.com
+  - corporate-rebels.com
+  note: Joost Minnaar + Pim de Morree partnership; not disentangled
+- id: person:addy-osmani
+  name: Addy Osmani
+  kind: person
+  aliases:
+  - addyo@substack.com
+- id: person:emily-kramer
+  name: Emily Kramer
+  kind: person
+  aliases:
+  - mkt1@substack.com
+- id: person:elena-verna
+  name: Elena Verna
+  kind: person
+  aliases:
+  - elenaverna@substack.com
+  note: posts in many places; name drives
+- id: person:greg-mckeown
+  name: Greg McKeown
+  kind: person
+  aliases:
+  - noreply@gregmckeown.com
+  - gregmckeown.com
+- id: person:jordan-cutler
+  name: Jordan Cutler
+  kind: person
+  aliases:
+  - highgrowthengineer@substack.com
+- id: person:nick-milo
+  name: Nick Milo
+  kind: person
+  aliases:
+  - hello@linkingyourthinking.com
+  - linkingyourthinking.com
+- id: person:sangram-vajre
+  name: Sangram Vajre
+  kind: person
+  aliases:
+  - fractionalfreedomfriday@substack.com
+  - gtmos@mail.beehiiv.com
+- id: person:kyle-poyar
+  name: Kyle Poyar
+  kind: person
+  aliases:
+  - kylepoyar@substack.com
+  - kylepoyar@mail.growthunhinged.com
+  - growthunhinged.com
+- id: person:kirupa-chinnathambi
+  name: Kirupa Chinnathambi
+  kind: person
+  aliases:
+  - kirupa@substack.com
+- id: person:melissa-perri
+  name: Melissa Perri
+  kind: person
+  aliases:
+  - melissa@productinstitute.com
+  - productinstitute.com
+- id: person:nathan-baugh
+  name: Nathan Baugh
+  kind: person
+  aliases:
+  - nathanbaugh@substack.com
+- id: person:roger-l-martin
+  name: Roger L. Martin
+  kind: person
+  aliases:
+  - rogerlmartin@substack.com
+- id: person:rob-snyder
+  name: Rob Snyder
+  kind: person
+  aliases:
+  - thephysicsofstartups@substack.com
+- id: person:casey-winters
+  name: Casey Winters
+  kind: person
+  aliases:
+  - caseyaccidental@substack.com
+- id: person:adam-grant
+  name: Adam Grant
+  kind: person
+  aliases:
+  - adamgrant@substack.com
+- id: org:menquilibrium
+  name: Menquilibrium
+  kind: org
+  aliases:
+  - tribe@menquilibrium.com
+  - menquilibrium.com
+  note: align Dragos to the brand
+- id: person:jake-mccgwire
+  name: Jake MccGwire
+  kind: person
+  aliases:
+  - the-release-notes@mail.beehiiv.com
+- id: person:arjay-mccandless
+  name: Arjay McCandless
+  kind: person
+  aliases:
+  - arjays-dev-download@mail.arjaythedev.com
+  - arjaythedev.com
+- id: person:brian-balfour
+  name: Brian Balfour
+  kind: person
+  aliases:
+  - brianbalfour@substack.com
+- id: person:brian-evergreen
+  name: Brian Evergreen
+  kind: person
+  aliases:
+  - brianevergreen@substack.com
+- id: person:james-clear
+  name: James Clear
+  kind: person
+  aliases:
+  - james@jamesclear.com
+  - jamesclear.com
+- id: person:sachin-rekhi
+  name: Sachin Rekhi
+  kind: person
+  aliases:
+  - sachinrekhi@substack.com
+- id: person:sebastian-raschka
+  name: Sebastian Raschka
+  kind: person
+  aliases:
+  - sebastianraschka@substack.com
+- id: person:oliver-cameron
+  name: Oliver Cameron
+  kind: person
+  aliases:
+  - olivercameron@substack.com
+- id: person:philip-heijkoop
+  name: Philip Heijkoop
+  kind: person
+  aliases:
+  - mephistophyles@gmail.com
+  - philip.heijkoop@gmail.com
+  note: 'DEFAULT: Phil''s own forwards — same person as philip.heijkoop@'

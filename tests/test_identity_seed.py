@@ -85,3 +85,86 @@ def test_apply_never_overwrites_a_curated_row(conn):
     seed.apply(conn, [wrong])
 
     assert authors.identity_of(conn, "email@stratechery.com") == "person:ben-thompson"
+
+
+# ── the curated record ────────────────────────────────────────────────────────
+SHARED_PLATFORMS = {
+    "substack.com", "beehiiv.com", "gmail.com", "ghost.io", "mailchimp.com",
+    "convertkit.com", "outlook.com", "googlemail.com", "mail.beehiiv.com",
+}
+
+
+def _curation():
+    import yaml
+    from pathlib import Path
+    return yaml.safe_load(Path("config/identities.yaml").read_text())["identities"]
+
+
+def test_no_alias_is_claimed_by_two_identities():
+    """A contested alias would make resolution depend on row order — one writer's claims
+    would attribute differently run to run."""
+    seen = {}
+    for e in _curation():
+        for a in e.get("aliases") or []:
+            assert a not in seen, f"{a} claimed by {seen.get(a)} and {e['id']}"
+            seen[a] = e["id"]
+
+
+def test_shared_platforms_are_never_aliased():
+    """substack.com pointing at one person would make every Substack writer that person."""
+    for e in _curation():
+        for a in e.get("aliases") or []:
+            assert a.lower() not in SHARED_PLATFORMS, f"{e['id']} claims the platform {a}"
+
+
+def test_every_identity_has_an_id_name_and_kind():
+    for e in _curation():
+        assert e["id"].startswith(("person:", "org:"))
+        assert e["name"] and e["kind"] in {"person", "org"}
+        assert e["id"].split(":", 1)[0] == e["kind"]
+
+
+def test_sync_writes_curated_rows(settings, conn, tmp_path):
+    import yaml
+    from pipeline import identity_seed as s
+
+    f = tmp_path / "ids.yaml"
+    f.write_text(yaml.safe_dump({"identities": [
+        {"id": "person:cj-gustafson", "name": "CJ Gustafson", "kind": "person",
+         "aliases": ["mostlymetrics@mail.mostlymetrics.com", "lookingforleverage@mail.beehiiv.com",
+                     "mostlymetrics.com"]},
+    ]}))
+    n_id, n_alias, conflicts = s.sync(settings, conn, str(f))
+
+    assert (n_id, n_alias, conflicts) == (1, 3, [])
+    # One author, however many publications — the whole point.
+    for key in ("mostlymetrics@mail.mostlymetrics.com", "lookingforleverage@mail.beehiiv.com",
+                "mostlymetrics.com"):
+        assert authors.identity_of(conn, key) == "person:cj-gustafson"
+
+
+def test_sync_reports_a_contested_alias_instead_of_applying_it(settings, conn, tmp_path):
+    import yaml
+    from pipeline import identity_seed as s
+
+    f = tmp_path / "ids.yaml"
+    f.write_text(yaml.safe_dump({"identities": [
+        {"id": "person:a", "name": "A", "kind": "person", "aliases": ["shared@example.com"]},
+        {"id": "person:b", "name": "B", "kind": "person", "aliases": ["shared@example.com"]},
+    ]}))
+    _, _, conflicts = s.sync(settings, conn, str(f))
+
+    assert len(conflicts) == 1 and "shared@example.com" in conflicts[0]
+    assert authors.identity_of(conn, "shared@example.com") == "person:a"  # first wins, not last
+
+
+def test_sync_is_idempotent(settings, conn, tmp_path):
+    import yaml
+    from pipeline import identity_seed as s
+
+    f = tmp_path / "ids.yaml"
+    f.write_text(yaml.safe_dump({"identities": [
+        {"id": "org:commoncog", "name": "Commoncog", "kind": "org",
+         "aliases": ["newsletter@commoncog.com", "commoncog.com"]},
+    ]}))
+    assert s.sync(settings, conn, str(f)) == s.sync(settings, conn, str(f))

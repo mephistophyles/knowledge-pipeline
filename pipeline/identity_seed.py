@@ -23,6 +23,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from email.header import decode_header, make_header
+from pathlib import Path
 
 
 from pipeline import authors
@@ -97,12 +98,16 @@ def classify(display: str) -> tuple[str | None, str, str]:
     by = _BY_AUTHOR.match(display)
     if by:  # the venue leads, the writer trails — take the writer
         return by.group("person"), "person", "person after 'by'"
-    if _POSSESSIVE.search(display):
-        return None, "org", f"possessive publication name {display!r}"
 
     stripped = _VENUE_SUFFIX.sub("", display).strip()
     if not stripped:
         return None, "org", "venue-only after suffix strip"
+
+    # Possessives are checked on the REMAINDER, not the raw display name: the venue is
+    # very often possessive while the writer is not — `Jim Cook from Cook's PlayBooks`
+    # is a person, and testing before the strip abstained on him.
+    if _POSSESSIVE.search(stripped):
+        return None, "org", f"possessive publication name {stripped!r}"
 
     had_suffix = stripped != display
     tokens = [t for t in stripped.split() if t]
@@ -175,3 +180,52 @@ def apply(conn: sqlite3.Connection, proposals: list[Proposal]) -> int:
         n += 1
     conn.commit()
     return n
+
+
+# ── the curated record ────────────────────────────────────────────────────────
+CURATION_PATH = "config/identities.yaml"
+
+
+def load_curation(settings: Settings, path: str | None = None) -> list[dict]:
+    """Read the curated identity file. Missing file → empty, not an error."""
+    import yaml
+
+    p = Path(path) if path else (settings.root / CURATION_PATH)
+    if not p.exists():
+        return []
+    data = yaml.safe_load(p.read_text()) or {}
+    return data.get("identities") or []
+
+
+def sync(settings: Settings, conn: sqlite3.Connection, path: str | None = None) -> tuple[int, int, list[str]]:
+    """Apply the curated file: every listed alias becomes `curated`.
+
+    This file is the canonical record — the thing that guarantees a source defined as
+    canonical stays canonical, so a channel seen for the first time next month resolves to
+    the identity decided today rather than becoming a new author. Returns
+    `(identities, aliases, conflicts)`; a conflict is one alias claimed by two identities,
+    which would make resolution order-dependent.
+    """
+    entries = load_curation(settings, path)
+    claimed: dict[str, str] = {}
+    conflicts: list[str] = []
+    n_alias = 0
+    for e in entries:
+        ident = e["id"]
+        authors.upsert_identity(
+            conn, ident, e.get("name") or ident, kind=e.get("kind", "person"), note=e.get("note")
+        )
+        for alias in e.get("aliases") or []:
+            key = alias.strip().lower()
+            if key in claimed and claimed[key] != ident:
+                conflicts.append(f"{key}: {claimed[key]} vs {ident}")
+                continue
+            claimed[key] = ident
+            authors.add_alias(
+                conn, key, ident,
+                kind="host" if "@" not in key else "email",
+                confidence="curated", source="config/identities.yaml",
+            )
+            n_alias += 1
+    conn.commit()
+    return len(entries), n_alias, conflicts
