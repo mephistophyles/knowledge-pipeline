@@ -518,9 +518,20 @@ def identity_harvest(
     people = [p for p in props if p.person]
     unknown = [p for p in props if not p.person]
 
-    typer.secho(f"\n{len(people)} person proposal(s):", bold=True, fg="green")
-    for p in sorted(people, key=lambda x: -x.editions):
-        typer.echo(f"  {p.person:<28} {p.alias:<44} ({p.editions:>4}) {p.reason}")
+    # Grouped by identity, not by alias: one writer with three publications is ONE author,
+    # and a flat per-alias listing reads as duplication when it is the opposite.
+    from collections import defaultdict
+
+    grouped: dict[str, list] = defaultdict(list)
+    for p in people:
+        grouped[p.identity_id].append(p)
+    typer.secho(
+        f"\n{len(people)} channel(s) → {len(grouped)} person identit(ies):", bold=True, fg="green"
+    )
+    for ident, ps in sorted(grouped.items(), key=lambda kv: -sum(p.editions for p in kv[1])):
+        typer.echo(f"  {ps[0].person:<28} {ident}")
+        for p in sorted(ps, key=lambda x: -x.editions):
+            typer.echo(f"       {p.alias:<46} ({p.editions:>4}) {p.reason}")
     typer.secho(f"\n{len(unknown)} need(s) a human — the writer is not in the header:", bold=True, fg="yellow")
     for p in sorted(unknown, key=lambda x: -x.editions):
         typer.echo(f"  {(p.display or '—'):<28} {p.alias:<44} ({p.editions:>4}) {p.reason}")
