@@ -575,6 +575,51 @@ def web_scan(
     typer.secho(f"\n{counts}", bold=True)
 
 
+@web_app.command("audit")
+def web_audit(
+    urls: Optional[List[str]] = typer.Argument(None, help="Sites or article URLs to audit."),
+    file: Optional[str] = typer.Option(None, "--file", "-f", help="File of sites/URLs."),
+) -> None:
+    """What a site publishes about how it wants to be read — check before a backlog run.
+
+    Reports robots.txt as it applies to us, any Crawl-delay, the sitemaps and feeds the
+    site PUBLISHES (its own index is sanctioned enumeration, and better citizenship than
+    crawling a link graph), and its terms page with any automated-access language.
+
+    It renders findings, not verdicts: whether a site's terms permit a personal reading
+    archive is your judgment, and a keyword scan of legal text is evidence, not advice.
+    """
+    from pipeline.web import audit as au
+    from pipeline.web import ledger
+
+    targets = list(urls or [])
+    if file:
+        targets += ledger.read_url_list(file)
+    if not targets:
+        typer.secho("give sites/URLs, or --file", fg="red")
+        raise typer.Exit(1)
+
+    for a in au.audit_many(targets):
+        typer.secho(f"\n── {a.host} " + "─" * max(0, 58 - len(a.host)), bold=True)
+        verdict = {True: "ALLOWED", False: "DISALLOWED", None: "unknown"}[a.allowed]
+        colour = {"ALLOWED": "green", "DISALLOWED": "red", "unknown": "yellow"}[verdict]
+        typer.secho(f"  robots.txt      HTTP {a.robots_status}  → {verdict} for our UA", fg=colour)
+        if a.crawl_delay and a.crawl_delay > 1:
+            typer.secho(f"  crawl-delay     {a.crawl_delay:g}s requested (honoured)", fg="cyan")
+        typer.echo(f"  sitemaps        {', '.join(a.sitemaps) if a.sitemaps else '—'}")
+        if a.sitemap_urls is not None:
+            typer.echo(f"  sitemap size    ~{a.sitemap_urls} URLs")
+        typer.echo(f"  feeds           {', '.join(a.feeds) if a.feeds else '—'}")
+        typer.echo(f"  terms           {a.terms_url or '—'}")
+        if a.terms_flags:
+            typer.secho(f"  terms mentions  {', '.join(a.terms_flags)}", fg="yellow")
+            typer.echo("                  ^ read the terms before a backlog run")
+            for sn in a.terms_snippets[:3]:
+                typer.echo(f"                  … {sn[:220]}")
+        for n in a.notes:
+            typer.echo(f"  note            {n}")
+
+
 @web_app.command("import")
 def web_import(
     path: str = typer.Argument(..., help="Saved .html/.mhtml file, or a directory of them."),
