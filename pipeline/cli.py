@@ -609,6 +609,54 @@ def web_import(
     typer.echo(f"  title:  {r.get('title') or '—'}\n  author: {who}\n  url from: {r['resolved_url_from']}")
 
 
+@web_app.command("derive")
+def web_derive(
+    limit: int = typer.Option(50, "--limit", help="Max pages to extract this run."),
+    site: Optional[str] = typer.Option(None, "--site", help="Restrict to one hostname."),
+) -> None:
+    """Extract archived pages into artifacts, queueing them for the corpus chain.
+
+    Reads the archive, so it makes no difference whether a page was fetched or saved from
+    the browser. Anything the quality gate distrusts is HELD with its reason rather than
+    processed, since a bad extraction costs an LLM call and lands in the vault.
+    """
+    from pipeline.web import derive as d
+
+    settings = _settings()
+    conn = _conn(settings)
+    VaultWriter(settings.vault_dir).ensure_layout()
+
+    def show(r):
+        if r["state"] == "held":
+            typer.secho(f"  ~ HELD ({r['reason']}, {r['word_count']}w) {r['url'][:70]}", fg="yellow")
+        else:
+            who = r["identity_id"] or "UNMAPPED"
+            typer.echo(f"  + {r['artifact_hash'][:12]}  {r['word_count']:>6}w  {who:<26} {r['url'][:56]}")
+
+    counts = d.derive(settings, conn, limit=limit, site=site, progress=show)
+    if not counts:
+        typer.echo("nothing archived and awaiting extraction")
+        return
+    typer.secho(f"\n{counts}", bold=True)
+
+
+@web_app.command("held")
+def web_held() -> None:
+    """Pages the quality gate would not trust, and why."""
+    settings = _settings()
+    conn = _conn(settings)
+    rows = conn.execute(
+        "SELECT url, escalation, title FROM web_backlog WHERE state='held' ORDER BY updated_at DESC"
+    ).fetchall()
+    if not rows:
+        typer.secho("nothing held", fg="green")
+        return
+    typer.secho(f"{len(rows)} page(s) held:", fg="yellow", bold=True)
+    for r in rows:
+        typer.echo(f"  {r['escalation']:<28} {r['url'][:76]}")
+    typer.echo("\n  paste a good body by hand:  pipeline add web --url <url> -f body.md")
+
+
 @web_app.command("status")
 def web_status() -> None:
     """Ledger totals, plus the escalation rate the fetch decision depends on."""
