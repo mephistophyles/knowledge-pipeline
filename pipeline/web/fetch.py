@@ -76,31 +76,67 @@ class Fetcher:
         self._robots: dict[str, urllib.robotparser.RobotFileParser | None] = {}
 
     # ── politeness ────────────────────────────────────────────────────────────
-    def _wait(self, host: str) -> None:
+    def _wait(self, host: str, interval: float | None = None) -> None:
         last = self._last_hit.get(host)
         if last is not None:
-            delay = self._min_interval - (time.monotonic() - last)
+            delay = (self._min_interval if interval is None else interval) - (time.monotonic() - last)
             if delay > 0:
                 time.sleep(delay)
         self._last_hit[host] = time.monotonic()
+
+    def _load_robots(self, url: str):
+        """Fetch and parse robots.txt OURSELVES, with our own User-Agent.
+
+        `RobotFileParser.read()` fetches with urllib's default UA (`Python-urllib/x.y`),
+        which Cloudflare and similar front ends routinely 403 — and urllib then treats a
+        403 as "disallow everything". The result is self-blocking on sites that plainly
+        permit us: measured against a real 22-URL backlog it reported 12 refusals, of
+        which andrewchen.com, davidafields.com, sachinrekhi.com and medium.com all in fact
+        allow the paths we asked for.
+
+        Status handling follows RFC 9309 §2.3.1: 2xx parse, 4xx means "no robots file
+        applies" so access is permitted, 5xx means the server is unwell and we back off
+        rather than lean on it.
+        """
+        scheme = urlsplit(url).scheme or "https"
+        host = site_of(url)
+        parser = urllib.robotparser.RobotFileParser()
+        parser.set_url(f"{scheme}://{host}/robots.txt")
+        try:
+            status, _headers, body = self._get(f"{scheme}://{host}/robots.txt")
+        except Exception:
+            parser.allow_all = True          # unreachable: cannot be a refusal
+            return parser
+        if 500 <= status:
+            parser.disallow_all = True       # unwell server: do not add load
+        elif 400 <= status < 500:
+            parser.allow_all = True          # no applicable robots file
+        else:
+            parser.parse(body.decode("utf-8", errors="replace").splitlines())
+        return parser
 
     def _allowed(self, url: str) -> bool:
         if not self._respect_robots:
             return True
         host = site_of(url)
         if host not in self._robots:
-            parser = urllib.robotparser.RobotFileParser()
-            scheme = urlsplit(url).scheme or "https"
-            parser.set_url(f"{scheme}://{host}/robots.txt")
-            try:
-                parser.read()
-            except Exception:
-                # An unreachable robots.txt is not permission to ignore it, but it is also
-                # not a refusal; treat as permissive, which is the documented convention.
-                parser = None
-            self._robots[host] = parser
-        parser = self._robots[host]
-        return True if parser is None else parser.can_fetch(USER_AGENT, url)
+            self._robots[host] = self._load_robots(url)
+        return self._robots[host].can_fetch(USER_AGENT, url)
+
+    def _crawl_delay(self, url: str) -> float:
+        """Honour a site's stated Crawl-delay when it exceeds our own floor.
+
+        andrewchen.com asks for 10 seconds. Ignoring that while claiming to respect
+        robots.txt would be picking the convenient half of the file.
+        """
+        parser = self._robots.get(site_of(url))
+        if parser is None:
+            return self._min_interval
+        try:
+            stated = parser.crawl_delay(USER_AGENT)
+        except Exception:
+            return self._min_interval
+        return max(self._min_interval, float(stated)) if stated else self._min_interval
 
     # ── the fetch ─────────────────────────────────────────────────────────────
     def _get(self, url: str):
@@ -131,7 +167,7 @@ class Fetcher:
         if not self._allowed(target):
             raise Escalation("robots_disallowed", target)
 
-        self._wait(site_of(target) or "")
+        self._wait(site_of(target) or "", self._crawl_delay(target))
         try:
             status, headers, body = self._get(target)
         except Escalation:

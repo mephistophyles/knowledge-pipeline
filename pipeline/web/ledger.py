@@ -6,6 +6,7 @@ work) is what lets a backlog be drained incrementally under the control plane.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 
 from pipeline import authors
@@ -146,13 +147,20 @@ def read_url_list(path: str) -> list[str]:
     text = Path(path).read_text()
     urls: list[str] = []
     for row in csv.reader(io.StringIO(text)):
+        found = None
         for cell in row:
-            cell = cell.strip().strip('"').strip()
-            if not cell or cell.startswith("#"):
-                continue
-            if cell.lower().startswith(("http://", "https://")):
-                urls.append(cell)
-                break  # one URL per row; later columns are metadata
+            # Cells are split further on whitespace and pipes: a hand-kept list is often
+            # `<url> | <title>`, and taking the cell whole would fetch the title as part
+            # of the URL. Markdown prose and headings have no http token and drop out.
+            for token in re.split(r"[\s|]+", cell.strip().strip('"')):
+                token = token.strip().strip("<>()[],")
+                if token.lower().startswith(("http://", "https://")):
+                    found = token
+                    break
+            if found:
+                break
+        if found:
+            urls.append(found)
 
     seen: set[str] = set()
     out: list[str] = []

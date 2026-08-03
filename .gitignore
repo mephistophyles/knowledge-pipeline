@@ -26,3 +26,8 @@ terraform.tfvars
 
 # OS
 .DS_Store
+
+# Scratch space shared between author and agents (see temp.md's own header).
+# Not committed by design: it holds URL dumps and pasted material, and the point of
+# it is that neither of us has to think about whether a paste is safe to publish.
+temp.md

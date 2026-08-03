@@ -6,7 +6,7 @@ import pytest
 from pipeline import authors
 from pipeline.web import ledger
 from pipeline.web.canonical import canonicalize, resolve_canonical_link, site_of
-from pipeline.web.fetch import Escalation, Fetcher
+from pipeline.web.fetch import USER_AGENT, Escalation, Fetcher
 
 
 def _page(body="<h1>Hello</h1>", title="A Post", canonical=None, ctype="text/html", status=200):
@@ -260,3 +260,100 @@ def test_urllib_http_error_is_converted_to_a_status_not_an_exception(monkeypatch
     with pytest.raises(Escalation) as e:
         Fetcher(respect_robots=False, min_interval=0).fetch("https://example.com/x")
     assert e.value.cause == "http_error" and e.value.detail == "403"
+
+
+def test_read_url_list_handles_url_pipe_title_lines(tmp_path):
+    """A hand-kept backlog is often `<url> | <title>`; taking the cell whole would fetch
+    the title as part of the URL."""
+    f = tmp_path / "backlog.md"
+    f.write_text(
+        "# Blog backlog\n\n"
+        "Some prose that is not a URL at all.\n\n"
+        "https://a.com/1 | A Title, With A Comma\n"
+        "https://b.com/2 | Another Title\n"
+    )
+    assert ledger.read_url_list(str(f)) == ["https://a.com/1", "https://b.com/2"]
+
+
+def test_read_url_list_ignores_markdown_prose_and_headings(tmp_path):
+    f = tmp_path / "notes.md"
+    f.write_text("## Heading\n\nA sentence mentioning nothing.\n\nhttps://a.com/1\n")
+    assert ledger.read_url_list(str(f)) == ["https://a.com/1"]
+
+
+# ── robots.txt ────────────────────────────────────────────────────────────────
+def _robots_transport(robots_body, robots_status=200, page_status=200):
+    def transport(url, headers):
+        if url.endswith("/robots.txt"):
+            return robots_status, {"Content-Type": "text/plain"}, robots_body
+        return page_status, {"Content-Type": "text/html"}, b"<html><title>T</title><body>hi</body></html>"
+    return transport
+
+
+def test_robots_is_fetched_with_our_own_user_agent():
+    """RobotFileParser.read() uses urllib's DEFAULT UA, which Cloudflare 403s — and urllib
+    reads a 403 as disallow-everything. That self-blocked us on sites that permit us: a
+    real 22-URL run reported 12 refusals, most of them false."""
+    seen = []
+
+    def transport(url, headers):
+        seen.append((url, headers.get("User-Agent")))
+        if url.endswith("/robots.txt"):
+            return 200, {}, b"User-agent: *\nDisallow: /wp-admin/\n"
+        return 200, {"Content-Type": "text/html"}, b"<html><title>T</title><body>ok</body></html>"
+
+    Fetcher(transport=transport, min_interval=0).fetch("https://andrewchen.com/post")
+    robots_ua = next(ua for u, ua in seen if u.endswith("robots.txt"))
+    assert robots_ua == USER_AGENT
+
+
+def test_a_path_the_site_permits_is_fetched():
+    f = Fetcher(transport=_robots_transport(b"User-agent: *\nDisallow: /wp-admin/\n"), min_interval=0)
+    assert f.fetch("https://andrewchen.com/psychd-funnel-conversion").url
+
+
+def test_an_empty_disallow_means_allow_everything():
+    """`Disallow:` with no path is Yoast's 'everything is fine' block."""
+    f = Fetcher(transport=_robots_transport(b"User-agent: *\nDisallow:\n"), min_interval=0)
+    assert f.fetch("https://davidafields.com/some-post").url
+
+
+def test_a_disallowed_path_is_still_refused():
+    f = Fetcher(transport=_robots_transport(b"User-agent: *\nDisallow: /private/\n"), min_interval=0)
+    with pytest.raises(Escalation) as e:
+        f.fetch("https://example.com/private/thing")
+    assert e.value.cause == "robots_disallowed"
+
+
+def test_missing_robots_permits_access():
+    """RFC 9309 §2.3.1: 4xx means no robots file applies."""
+    f = Fetcher(transport=_robots_transport(b"", robots_status=404), min_interval=0)
+    assert f.fetch("https://example.com/post").url
+
+
+def test_a_403_on_robots_does_not_mean_disallow_everything():
+    """The exact false refusal: urllib's parser treats 403 as a total ban."""
+    f = Fetcher(transport=_robots_transport(b"", robots_status=403), min_interval=0)
+    assert f.fetch("https://speakingsherpa.com/post").url
+
+
+def test_a_failing_server_makes_us_back_off():
+    """5xx: the server is unwell, so do not add load."""
+    f = Fetcher(transport=_robots_transport(b"", robots_status=503), min_interval=0)
+    with pytest.raises(Escalation) as e:
+        f.fetch("https://example.com/post")
+    assert e.value.cause == "robots_disallowed"
+
+
+def test_a_stated_crawl_delay_is_honoured():
+    """andrewchen.com asks for 10s. Ignoring it while claiming to respect robots.txt
+    would be picking the convenient half of the file."""
+    f = Fetcher(transport=_robots_transport(b"User-agent: *\nCrawl-delay: 10\n"), min_interval=1)
+    f.fetch("https://andrewchen.com/a")
+    assert f._crawl_delay("https://andrewchen.com/b") == 10.0
+
+
+def test_our_floor_wins_when_the_site_asks_for_less():
+    f = Fetcher(transport=_robots_transport(b"User-agent: *\nCrawl-delay: 0.1\n"), min_interval=1)
+    f.fetch("https://example.com/a")
+    assert f._crawl_delay("https://example.com/b") == 1.0
