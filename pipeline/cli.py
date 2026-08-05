@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 import time
+from datetime import timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -500,6 +501,79 @@ def recount(
         typer.echo(f"  {claim_id:<28} {before} → {after}")
     if not apply_:
         typer.secho("\ndry run — re-run with --apply to write these", fg="cyan")
+
+
+feed_app = typer.Typer(help="Ongoing weekly email batches (Saturday→Friday).")
+app.add_typer(feed_app, name="feed")
+
+
+@feed_app.command("weeks")
+def feed_weeks(
+    since: str = typer.Option("2026-08-01", "--since", help="First Saturday to track."),
+) -> None:
+    """List Saturday→Friday windows since the cutoff, with what each has pulled."""
+    from datetime import date
+
+    from pipeline import feed
+
+    settings = _settings()
+    conn = _conn(settings)
+    today = date.today()
+    weeks = feed.weeks_since(date.fromisoformat(since), today)
+    typer.secho(f"{'week':<28}{'archived':>9}{'process':>9}{'ingested':>9}  state", bold=True)
+    for s in feed.week_status(conn, weeks):
+        w = s["week"]
+        state = "complete" if w.is_complete(today) else "in progress"
+        typer.echo(
+            f"{w.label:<28}{s['archived']:>9}{s['process']:>9}{s['ingested']:>9}  {state}"
+        )
+
+
+@feed_app.command("pull")
+def feed_pull(
+    label: str = typer.Option("Insight", "--label", help="Gmail label to pull."),
+    week: Optional[str] = typer.Option(None, "--week", help="Saturday of the week (YYYY-MM-DD)."),
+    catch_up: bool = typer.Option(False, "--catch-up", help="Pull every complete week since --since."),
+    since: str = typer.Option("2026-08-01", "--since", help="First Saturday to track."),
+    include_current: bool = typer.Option(
+        False, "--include-current", help="Also pull the week in progress (partial batch)."
+    ),
+) -> None:
+    """Archive a week's messages into the ledger, tagged `week:<saturday>`.
+
+    The window IS the cursor: pulling a given week is the same operation whenever you run
+    it, and re-running costs only the re-read because archiving is keyed on content hash.
+    """
+    from datetime import date
+
+    from pipeline import feed
+
+    settings = _settings()
+    conn = _conn(settings)
+    today = date.today()
+
+    if week:
+        targets = [feed.Week(feed.week_start(date.fromisoformat(week)),
+                             feed.week_start(date.fromisoformat(week)) + timedelta(days=6))]
+    elif catch_up:
+        targets = [w for w in feed.weeks_since(date.fromisoformat(since), today)
+                   if w.is_complete(today) or include_current]
+    else:
+        typer.secho("give --week YYYY-MM-DD or --catch-up", fg="red")
+        raise typer.Exit(1)
+    if not targets:
+        typer.echo("no complete weeks yet — use --include-current to pull the week in progress")
+        return
+
+    for w in targets:
+        typer.secho(f"\npulling {w.label} from {label!r} …", bold=True)
+        try:
+            counts = feed.pull_week(settings, conn, label=label, week=w)
+        except RuntimeError as e:
+            typer.secho(f"  {e}", fg="red")
+            raise typer.Exit(1)
+        typer.echo(f"  {counts}")
+    typer.secho("\nnow: pipeline backlog batches --assign && pipeline backlog run", fg="cyan")
 
 
 web_app = typer.Typer(help="Web backlog: fetch once into an archive, then page the ledger.")

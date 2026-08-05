@@ -102,9 +102,19 @@ models:
   # Entity extraction + same-entity tiebreak (plan §6.4). One model, two prompts
   # (entities_extract / entities_confirm), both at this prompt_version.
   entities:
-    provider: ollama
-    model: gemma4:latest
-    params: {temperature: 0}
+    # Moved off local gemma4: 247 queued jobs at ~20-31s each is an hour-plus of GPU burn
+    # on a working laptop, which is not a long-term workflow.
+    #
+    # super-120b, not ultra: on a 6-sample bake-off against the same prompt and inputs it
+    # parsed 6/6 with no empty responses (the failure that got super REJECTED for
+    # extract_claims did not reproduce — entity output is short, so the reasoning budget
+    # is not the constraint it was there), agreed with gemma4 where gemma4 was right, and
+    # avoided gemma4's false positives: gemma4 returned "coaching/consulting/advisory" as
+    # entities, which are generic nouns, where both NVIDIA models correctly returned none.
+    # Small sample and no ground truth, so this is evidence for parity, NOT a quality win.
+    provider: nvidia
+    model: nvidia/nemotron-3-super-120b-a12b
+    params: {temperature: 0, max_tokens: 4096}
     prompt_version: v1
   #
   # Offline / free alternative for any stage — flip provider+model to Ollama:

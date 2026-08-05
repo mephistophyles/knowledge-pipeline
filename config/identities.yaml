@@ -299,6 +299,7 @@ identities:
   kind: person
   aliases:
   - sachinrekhi@substack.com
+  - sachinrekhi.com
 - id: person:sebastian-raschka
   name: Sebastian Raschka
   kind: person
@@ -316,3 +317,78 @@ identities:
   - mephistophyles@gmail.com
   - philip.heijkoop@gmail.com
   note: 'DEFAULT: Phil''s own forwards — same person as philip.heijkoop@'
+- id: person:david-fields
+  name: David Fields
+  kind: person
+  aliases:
+  - davidafields.com
+- id: person:sam-altman
+  name: Sam Altman
+  kind: person
+  aliases:
+  - blog.samaltman.com
+- id: person:wes-kao
+  name: Wes Kao
+  kind: person
+  aliases:
+  - weskao.com
+- id: org:stripe
+  name: Stripe
+  kind: org
+  aliases:
+  - stripe.com
+- id: org:stay-saasy
+  name: Stay Saasy
+  kind: org
+  aliases:
+  - staysaasy.com
+- id: person:ely-lerner
+  name: Ely Lerner
+  kind: person
+  aliases:
+  - reforge.com
+- id: person:maarten-claes
+  name: Maarten Claes
+  kind: person
+  aliases:
+  - mcls.io
+- id: person:will-larson
+  name: Will Larson
+  kind: person
+  aliases:
+  - lethain.com
+- id: person:patrick-mckenzie
+  name: Patrick McKenzie
+  kind: person
+  aliases:
+  - kalzumeus.com
+- id: person:paul-stansik
+  name: Paul Stansik
+  kind: person
+  aliases:
+  - hellooperator.substack.com
+- id: person:wes-pearce
+  name: Wes Pearce
+  kind: person
+  aliases:
+  - escapethecubicle.substack.com
+- id: person:andrew-chen
+  name: Andrew Chen
+  kind: person
+  aliases:
+  - andrewchen.com
+- id: person:jonathan-haidt
+  name: Jonathan Haidt
+  kind: person
+  aliases:
+  - theatlantic.com
+- id: person:yuhki-yamashita
+  name: Yuhki Yamashita
+  kind: person
+  aliases:
+  - figma.com
+- id: person:lindsay-mcgregor
+  name: Lindsay McGregor
+  kind: person
+  aliases:
+  - hbr.org
