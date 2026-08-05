@@ -197,6 +197,73 @@ def load_curation(settings: Settings, path: str | None = None) -> list[dict]:
     return data.get("identities") or []
 
 
+def upsert_curation(
+    settings: Settings,
+    conn: sqlite3.Connection,
+    *,
+    identity_id: str,
+    name: str,
+    kind: str,
+    alias: str,
+    path: str | None = None,
+) -> dict:
+    """Record a mapping in BOTH the database and `config/identities.yaml`.
+
+    The file is the canonical record, so a decision made in the dashboard has to land
+    there too — otherwise the DB drifts from the file and the next `identity sync`
+    silently reverts what a human just decided.
+
+    Existing identities gain the alias; new ones are appended. The header comment is
+    preserved because it states the rules the file is curated by, and a round-trip through
+    yaml would drop it.
+    """
+    import yaml
+
+    p = Path(path) if path else (settings.root / CURATION_PATH)
+    header, entries = "", []
+    if p.exists():
+        text = p.read_text()
+        header = "".join(
+            ln for ln in text.splitlines(keepends=True)[: _header_len(text)]
+        )
+        entries = (yaml.safe_load(text) or {}).get("identities") or []
+
+    alias = alias.strip().lower()
+    entry = next((e for e in entries if e.get("id") == identity_id), None)
+    if entry is None:
+        entry = {"id": identity_id, "name": name, "kind": kind, "aliases": []}
+        entries.append(entry)
+    entry["name"] = name or entry.get("name") or identity_id
+    entry["kind"] = kind or entry.get("kind", "person")
+    # An alias belongs to exactly one identity; moving it means removing it elsewhere,
+    # or resolution would depend on row order.
+    for other in entries:
+        if other is not entry:
+            other["aliases"] = [a for a in (other.get("aliases") or []) if a != alias]
+    if alias not in (entry.get("aliases") or []):
+        entry.setdefault("aliases", []).append(alias)
+
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(header + yaml.safe_dump({"identities": entries}, sort_keys=False,
+                                         allow_unicode=True, width=100))
+
+    authors.upsert_identity(conn, identity_id, entry["name"], kind=entry["kind"])
+    authors.add_alias(conn, alias, identity_id, confidence="curated", source="dashboard")
+    conn.commit()
+    return {"identity_id": identity_id, "name": entry["name"], "alias": alias}
+
+
+def _header_len(text: str) -> int:
+    """Number of leading comment/blank lines to keep verbatim."""
+    n = 0
+    for ln in text.splitlines():
+        if ln.startswith("#") or not ln.strip():
+            n += 1
+        else:
+            break
+    return n
+
+
 def sync(settings: Settings, conn: sqlite3.Connection, path: str | None = None) -> tuple[int, int, list[str]]:
     """Apply the curated file: every listed alias becomes `curated`.
 

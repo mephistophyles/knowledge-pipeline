@@ -53,6 +53,18 @@ providers:
       # EXTRACTION model (bake-off winner): reliable, ~GLM-5.2 quality, ~30% cheaper.
       # A `:free` slug exists ($0, shared-pool daily cap) for zero-cost runs; this is paid.
       nvidia/nemotron-3-ultra-550b-a55b: {in: 0.50, out: 2.20}
+  nvidia:
+    # NVIDIA's own build endpoint — a SECOND route to the same extraction model. The
+    # OpenRouter `:free` slug shares a throttled pool and absorbed ~18% retries under
+    # sustained load, which is what made the backlog estimate 27h serial. This is the
+    # first-party path, and it carries the identical model id.
+    type: openai_compat
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_API_KEY
+    pricing:
+      # Credits-based on the build tier rather than per-token billing; recorded as 0 so
+      # the costs table stays honest instead of inventing a rate we are not charged.
+      nvidia/nemotron-3-ultra-550b-a55b: {in: 0.0, out: 0.0}
   ollama:
     type: openai_compat
     base_url: http://localhost:11434/v1
@@ -64,8 +76,12 @@ providers:
 # model/provider for that step; the generating key rides into the note frontmatter.
 models:
   extract_claims:
-    provider: openrouter      # bake-off winner; ollama gemma4 remains a free local fallback
-    model: nvidia/nemotron-3-ultra-550b-a55b:free   # free tier while the promo lasts; paid slug is the same model
+    # Same bake-off-winning model, now via NVIDIA's FIRST-PARTY endpoint rather than the
+    # OpenRouter `:free` slug. That slug shares a throttled pool: it absorbed ~18% retries
+    # under sustained serial load, which is what turned the backlog estimate into 27h.
+    # OpenRouter remains a drop-in fallback — identical model id, just change `provider`.
+    provider: nvidia
+    model: nvidia/nemotron-3-ultra-550b-a55b
     # max_tokens is the OUTPUT cap, not a context limit: the model's window is 512k and
     # our inputs run ~6k, so input is never the constraint. At 4096 the CAP decided the
     # claim count on 7/178 pilot editions (5 of them Commoncog) — silent truncation, the

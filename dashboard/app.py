@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import sqlite3
 from math import ceil
 from pathlib import Path
@@ -345,6 +346,152 @@ def _read_output(path: str | None, limit: int = 6000) -> str:
     return text[:limit] + ("\n… (truncated)" if len(text) > limit else "")
 
 
+# ── unmapped authors queue ────────────────────────────────────────────────────
+def unmapped_authors(conn: sqlite3.Connection) -> list[dict]:
+    """Channel keys with no curated identity, from BOTH ledgers.
+
+    This is a queue, not a gate: unmapped sources still ingest, their attestations are
+    just provisional and cannot corroborate. So it can sit for a fortnight without
+    blocking anything — which is the point of putting it where it will actually be seen.
+    """
+    rows: list[dict] = []
+    curated = "(SELECT alias FROM identity_aliases WHERE confidence='curated')"
+
+    for r in conn.execute(
+        f"SELECT site AS key, COUNT(*) n, MIN(title) sample, MIN(url) url "
+        f"FROM web_backlog WHERE site IS NOT NULL AND identity_id IS NULL "
+        f"AND state<>'escalated' AND site NOT IN {curated} GROUP BY site ORDER BY n DESC"
+    ):
+        rows.append({"key": r["key"], "kind_hint": "host", "n": r["n"],
+                     "sample": r["sample"] or "", "url": r["url"] or ""})
+
+    try:
+        for r in conn.execute(
+            f"SELECT author AS key, COUNT(*) n, MIN(subject) sample FROM backlog "
+            f"WHERE author IS NOT NULL AND author NOT IN {curated} "
+            f"GROUP BY author ORDER BY n DESC"
+        ):
+            rows.append({"key": r["key"], "kind_hint": "email", "n": r["n"],
+                         "sample": r["sample"] or "", "url": ""})
+    except sqlite3.OperationalError:
+        pass  # no email backlog in this DB
+    return rows
+
+
+def known_identities(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT identity_id, display_name, kind, "
+        "(SELECT COUNT(*) FROM identity_aliases a WHERE a.identity_id=i.identity_id) aliases "
+        "FROM identities i ORDER BY display_name"
+    ).fetchall()
+
+
+def _suggest_name(key: str) -> str:
+    """A starting point for the name field, never an assertion.
+
+    `andrewchen.com` -> `Andrewchen` is wrong but one keystroke from right, which beats an
+    empty box. Guessing harder (splitting on capital boundaries, dictionary lookups) would
+    produce confident nonsense on exactly the names that matter.
+    """
+    label = key.split("@")[-1] if "@" in key else key
+    label = re.sub(r"^(www|newsletter|mail|email|blog|news)\.", "", label)
+    label = label.rsplit(".", 1)[0] if "." in label else label
+    return label.replace("-", " ").replace(".", " ").title()
+
+
+def _render_authors(rows: list[dict], idents: list[sqlite3.Row]) -> str:
+    if not rows:
+        return ("<h2>unmapped authors</h2><p>Every channel resolves to a curated "
+                "identity. Nothing to decide.</p>")
+    opts = "".join(
+        f"<option value={html.escape(i['identity_id'])}>"
+        f"{html.escape(i['display_name'])} ({i['aliases']})</option>"
+        for i in idents
+    )
+    out = [
+        "<h2>unmapped authors</h2>",
+        f"<p class=nudge>{len(rows)} channel(s) with no author. These still ingest — their "
+        "attestations are marked provisional and cannot corroborate until mapped, so this "
+        "queue never blocks the pipeline.</p>",
+        "<table><tr><th>channel</th><th>seen</th><th>sample</th>"
+        "<th>attach to existing</th><th>or name a new author</th><th></th></tr>",
+    ]
+    for r in rows:
+        key = html.escape(r["key"])
+        sample = html.escape((r["sample"] or "")[:70])
+        link = f" <a href='{html.escape(r['url'])}' target=_blank>↗</a>" if r["url"] else ""
+        out.append(
+            "<tr><form method=post action=/authors/map>"
+            f"<td><code>{key}</code><input type=hidden name=alias value='{key}'></td>"
+            f"<td>{r['n']}</td>"
+            f"<td class=dim>{sample}{link}</td>"
+            "<td><select name=identity_id><option value=''>— new —</option>"
+            f"{opts}</select></td>"
+            f"<td><input name=name value='{html.escape(_suggest_name(r['key']))}' size=22>"
+            "<label class=dim><input type=radio name=kind value=person checked> person</label>"
+            "<label class=dim><input type=radio name=kind value=org> org</label></td>"
+            "<td><button type=submit>save</button></td>"
+            "</form></tr>"
+        )
+    out.append("</table>")
+    return "\n".join(out)
+
+
+@app.get("/authors", response_class=HTMLResponse)
+def authors_page() -> str:
+    conn = _ro_conn(Settings.load())
+    with conn:
+        return _page(_render_authors(unmapped_authors(conn), known_identities(conn)))
+
+
+@app.post("/authors/map")
+def authors_map(
+    alias: str = Form(...),
+    identity_id: str = Form(default=""),
+    name: str = Form(default=""),
+    kind: str = Form(default="person"),
+) -> RedirectResponse:
+    """Map one channel to an author, writing through to config/identities.yaml.
+
+    Attaching to an existing identity is how one writer across several publications stays
+    ONE author — the Andrew Chen case, where the same person appears on his own site, on a
+    firm's blog, and as a guest elsewhere.
+    """
+    from pipeline import authors as A
+    from pipeline import identity_seed
+
+    settings = Settings.load()
+    conn = _rw_conn(settings)
+    with conn:
+        if identity_id:
+            row = conn.execute(
+                "SELECT display_name, kind FROM identities WHERE identity_id=?", (identity_id,)
+            ).fetchone()
+            name, kind = (row["display_name"], row["kind"]) if row else (name, kind)
+        else:
+            name = (name or alias).strip()
+            identity_id = f"{kind}:{A.slug(name)}"
+        identity_seed.upsert_curation(
+            settings, conn, identity_id=identity_id, name=name, kind=kind, alias=alias
+        )
+        _backfill_identity(conn, alias, identity_id)
+    return RedirectResponse("/authors", status_code=303)
+
+
+def _backfill_identity(conn: sqlite3.Connection, alias: str, identity_id: str) -> None:
+    """Apply a new mapping to rows already in the ledger.
+
+    Without this, deciding an author only affects pages fetched afterwards, and the
+    backlog that prompted the decision stays unmapped — which reads as the form not
+    having worked.
+    """
+    conn.execute(
+        "UPDATE web_backlog SET identity_id=?, updated_at=datetime('now') "
+        "WHERE identity_id IS NULL AND (site=? OR site LIKE ?)",
+        (identity_id, alias, f"%.{alias}"),
+    )
+
+
 def _page(body: str) -> str:
     return f"""<!doctype html><meta charset=utf-8>
 <title>knowledge-pipeline</title>
@@ -364,4 +511,4 @@ pre{{background:#f7f7f7;padding:.5rem;overflow:auto;max-height:24rem}}
 a{{color:#06c}}</style>
 <button class=refresh onclick="location.reload()">↻ refresh</button>
 {body}
-<hr><p><a href=/api/summary>/api/summary</a> · <a href=/health>/health</a> · manual refresh</p>"""
+<hr><p><a href=/>overview</a> · <a href=/authors>authors</a> · <a href=/api/summary>/api/summary</a> · <a href=/health>/health</a> · manual refresh</p>"""

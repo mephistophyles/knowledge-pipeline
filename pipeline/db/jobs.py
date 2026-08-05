@@ -132,6 +132,9 @@ def record_attempt_failure(
     return status
 
 
+_CLAIM_PAGE = 200   # rows scanned per pass when looking for a runnable job
+
+
 def claim_next(
     conn: sqlite3.Connection,
     worker_id: str,
@@ -153,19 +156,30 @@ def claim_next(
 
     conn.execute("BEGIN IMMEDIATE")
     try:
-        candidates = conn.execute(
-            f"SELECT * FROM jobs WHERE status='ready' AND stage IN ({placeholders}) "
-            f"ORDER BY created_at LIMIT 25",
-            stages,
-        ).fetchall()
+        # Page through the queue rather than filtering a fixed window of the oldest rows.
+        # Taking the oldest 25 and THEN discarding paused ones let a paused stage starve
+        # every other stage: 160 old `entities` jobs filled the window, so 88 ready
+        # `extract_claims` behind them looked like an empty queue and the worker stopped.
+        # Pausing one stage must not stall the rest of the pipeline — that is the whole
+        # point of a per-stage control.
         chosen = None
-        for job in candidates:
-            if ctl.effective_state(conn, job["stage"], job["source_type"], job["artifact_hash"]) == "paused":
-                continue
-            if _over_limit(job, limits, processed):
-                continue
-            chosen = job
-            break
+        offset = 0
+        while chosen is None:
+            candidates = conn.execute(
+                f"SELECT * FROM jobs WHERE status='ready' AND stage IN ({placeholders}) "
+                f"ORDER BY created_at LIMIT ? OFFSET ?",
+                [*stages, _CLAIM_PAGE, offset],
+            ).fetchall()
+            if not candidates:
+                break
+            for job in candidates:
+                if ctl.effective_state(conn, job["stage"], job["source_type"], job["artifact_hash"]) == "paused":
+                    continue
+                if _over_limit(job, limits, processed):
+                    continue
+                chosen = job
+                break
+            offset += _CLAIM_PAGE
         if chosen is None:
             conn.execute("COMMIT")
             return None

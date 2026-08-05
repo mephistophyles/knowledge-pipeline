@@ -110,3 +110,28 @@ def test_failure_exhausts_to_dead_letter(conn):
     jobs.insert_job(conn, "z" * 64, "source_note", "paste")
     statuses = [jobs.record_attempt_failure(conn, "z" * 64, "source_note", "boom", 3) for _ in range(3)]
     assert statuses == ["ready", "ready", "failed"]
+
+
+def test_a_paused_stage_does_not_starve_newer_stages(settings, conn):
+    """Taking the oldest N ready jobs and THEN dropping paused ones let one paused stage
+    hide every other stage's work: 160 old `entities` jobs filled the window, so 88 ready
+    `extract_claims` behind them looked like an empty queue."""
+    from pipeline.db import controls as ctl
+    from pipeline.db import jobs
+
+    for i in range(60):
+        jobs.insert_job(conn, f"old{i:03d}", "entities", "email")
+    jobs.insert_job(conn, "newer", "extract_claims", "email")
+    ctl.set_control(conn, "stage", "entities", state="paused")
+
+    got = jobs.claim_next(conn, "w1", ["extract_claims", "entities"])
+    assert got is not None and got["stage"] == "extract_claims"
+
+
+def test_claiming_returns_nothing_when_everything_runnable_is_paused(settings, conn):
+    from pipeline.db import controls as ctl
+    from pipeline.db import jobs
+
+    jobs.insert_job(conn, "a", "entities", "email")
+    ctl.set_control(conn, "stage", "entities", state="paused")
+    assert jobs.claim_next(conn, "w1", ["entities"]) is None
