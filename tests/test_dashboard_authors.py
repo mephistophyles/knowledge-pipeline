@@ -17,7 +17,10 @@ def _client(settings, monkeypatch):
 
 
 def _page(settings, conn, url, title="A Post"):
-    archive(settings, conn, Fetched(url=url, requested_url=url, body=b"<html>x</html>",
+    # Body must vary with the URL: identical bytes hash identically, so the archive would
+    # (correctly) store one row and the test would be measuring content-addressing.
+    archive(settings, conn, Fetched(url=url, requested_url=url,
+                                    body=f"<html>{url}</html>".encode(),
                                     content_type="text/html", http_status=200, title=title))
 
 
@@ -129,3 +132,87 @@ def test_the_page_renders_and_says_when_there_is_nothing_to_do(settings, conn, m
     _page(settings, conn, "https://andrewchen.com/x")
     body = client.get("/authors").text
     assert "andrewchen.com" in body and "never blocks" in body
+
+
+# ── shared platforms host many writers ────────────────────────────────────────
+def test_platform_articles_are_listed_per_writer_not_per_host(settings, conn):
+    """medium.com hosts everybody. Collapsing its articles into one row would offer to map
+    three different writers to a single identity — merging distinct PEOPLE, which is worse
+    than any miscount."""
+    _page(settings, conn, "https://medium.com/@stewart/we-dont-sell-saddles-here")
+    _page(settings, conn, "https://medium.com/firm-narrative/why-great-pitches-come")
+    _page(settings, conn, "https://medium.com/@sib1013/writing-docs-at-amazon")
+
+    keys = {r["key"] for r in dash.unmapped_authors(conn)}
+    assert keys == {"medium.com/@stewart", "medium.com/firm-narrative", "medium.com/@sib1013"}
+
+
+def test_an_ordinary_site_is_still_one_row(settings, conn):
+    _page(settings, conn, "https://andrewchen.com/a")
+    _page(settings, conn, "https://andrewchen.com/b")
+    rows = dash.unmapped_authors(conn)
+    assert [r["key"] for r in rows] == ["andrewchen.com"]
+    assert rows[0]["n"] == 2
+
+
+def test_mapping_one_platform_writer_does_not_claim_the_others(settings, conn, monkeypatch):
+    _page(settings, conn, "https://medium.com/@stewart/we-dont-sell-saddles-here")
+    _page(settings, conn, "https://medium.com/@sib1013/writing-docs-at-amazon")
+    client = _client(settings, monkeypatch)
+
+    client.post("/authors/map", data={"alias": "medium.com/@stewart", "identity_id": "",
+                                      "name": "Stewart Butterfield", "kind": "person"})
+
+    rows = conn.execute("SELECT url, identity_id FROM web_backlog ORDER BY url").fetchall()
+    mapped = {r["url"]: r["identity_id"] for r in rows}
+    assert mapped["https://medium.com/@stewart/we-dont-sell-saddles-here"] == "person:stewart-butterfield"
+    assert mapped["https://medium.com/@sib1013/writing-docs-at-amazon"] is None
+    assert [r["key"] for r in dash.unmapped_authors(conn)] == ["medium.com/@sib1013"]
+
+
+def test_mapping_is_not_retroactive_until_applied(settings, conn, fake_claims, monkeypatch):
+    """Deciding who wrote something has no effect on notes already written until
+    `identity apply` runs — that is the other half of the workflow, not a tidy-up."""
+    from pipeline import corpus_dedup
+    from pipeline.ingestors.email import ingest_message
+    from pipeline.orchestrator.executor import run_stage
+
+    from .conftest import FakeMsg
+
+    fake_claims["text"] = '[{"claim": "A claim.", "quote": "q"}]'
+    h = ingest_message(settings, conn, FakeMsg(text="ed", from_="new@example.com", subject="S"))
+    for stage in ("source_note", "extract_claims", "dedup"):
+        run_stage(settings, conn, h, stage)
+
+    note = settings.vault_dir / f"corpus/claims/claim-{h[:8]}-00.md"
+    from pipeline.vault.writer import read_note
+    assert read_note(note).metadata["attestations"][0]["provisional"] is True
+
+    authors.upsert_identity(conn, "person:new", "New Writer")
+    authors.add_alias(conn, "new@example.com", "person:new", confidence="curated")
+    assert read_note(note).metadata["attestations"][0].get("provisional") is True  # still
+
+    upgraded = corpus_dedup.resolve_provisional(settings, conn)
+    assert upgraded == [(f"claim-{h[:8]}-00", "person:new")]
+    att = read_note(note).metadata["attestations"][0]
+    assert att["identity"] == "person:new" and "provisional" not in att
+
+
+def test_resolve_provisional_dry_run_writes_nothing(settings, conn, fake_claims):
+    from pipeline import corpus_dedup
+    from pipeline.ingestors.email import ingest_message
+    from pipeline.orchestrator.executor import run_stage
+    from pipeline.vault.writer import read_note
+
+    from .conftest import FakeMsg
+
+    fake_claims["text"] = '[{"claim": "A claim.", "quote": "q"}]'
+    h = ingest_message(settings, conn, FakeMsg(text="ed", from_="new@example.com", subject="S"))
+    for stage in ("source_note", "extract_claims", "dedup"):
+        run_stage(settings, conn, h, stage)
+    authors.upsert_identity(conn, "person:new", "New Writer")
+    authors.add_alias(conn, "new@example.com", "person:new", confidence="curated")
+
+    assert corpus_dedup.resolve_provisional(settings, conn, dry_run=True)
+    note = settings.vault_dir / f"corpus/claims/claim-{h[:8]}-00.md"
+    assert read_note(note).metadata["attestations"][0]["provisional"] is True

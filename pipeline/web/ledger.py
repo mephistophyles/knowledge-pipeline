@@ -11,7 +11,9 @@ import sqlite3
 
 from pipeline import authors
 from pipeline.config import Settings
-from pipeline.web.canonical import SHARED_PLATFORMS, canonicalize, registrable, site_of
+from pipeline.web.canonical import (
+    SHARED_PLATFORMS, canonicalize, channel_key, registrable, site_of,
+)
 from pipeline.web.fetch import Escalation, Fetcher, Fetched
 
 
@@ -33,7 +35,14 @@ def identity_for(conn: sqlite3.Connection, url: str) -> str | None:
     Pages that stay unmapped attest provisionally, which is the safe direction.
     """
     host = site_of(url)
-    if not host or host in SHARED_PLATFORMS:
+    if not host:
+        return None
+    # The per-publisher key first: on a shared platform `medium.com/@stewart` identifies a
+    # writer where the bare host identifies only the platform.
+    key = channel_key(url)
+    if key and key != host:
+        return authors.identity_of(conn, key)
+    if host in SHARED_PLATFORMS:
         return None
     found = authors.identity_of(conn, host)
     if found:

@@ -354,16 +354,31 @@ def unmapped_authors(conn: sqlite3.Connection) -> list[dict]:
     just provisional and cannot corroborate. So it can sit for a fortnight without
     blocking anything — which is the point of putting it where it will actually be seen.
     """
+    from pipeline.web.canonical import SHARED_PLATFORMS, channel_key
+
     rows: list[dict] = []
     curated = "(SELECT alias FROM identity_aliases WHERE confidence='curated')"
 
+    # Grouped by PUBLISHER, not by host. medium.com hosts everybody, so collapsing its
+    # articles into one row would offer to map three different writers — Scott, Andy
+    # Raskin and Stewart Butterfield — to a single identity. Merging distinct people is
+    # worse than any miscount, so platform-hosted pieces are listed one per article.
+    seen: dict[str, dict] = {}
     for r in conn.execute(
-        f"SELECT site AS key, COUNT(*) n, MIN(title) sample, MIN(url) url "
-        f"FROM web_backlog WHERE site IS NOT NULL AND identity_id IS NULL "
-        f"AND state<>'escalated' AND site NOT IN {curated} GROUP BY site ORDER BY n DESC"
+        f"SELECT site, url, title FROM web_backlog WHERE site IS NOT NULL "
+        f"AND identity_id IS NULL AND state<>'escalated' AND site NOT IN {curated} "
+        f"ORDER BY fetched_at"
     ):
-        rows.append({"key": r["key"], "kind_hint": "host", "n": r["n"],
-                     "sample": r["sample"] or "", "url": r["url"] or ""})
+        key = channel_key(r["url"]) or r["site"]
+        if key in curated_aliases(conn):
+            continue
+        entry = seen.setdefault(key, {
+            "key": key, "kind_hint": "host", "n": 0, "sample": r["title"] or "",
+            "url": r["url"] or "",
+            "platform": r["site"] in SHARED_PLATFORMS,
+        })
+        entry["n"] += 1
+    rows.extend(sorted(seen.values(), key=lambda e: -e["n"]))
 
     try:
         for r in conn.execute(
@@ -376,6 +391,11 @@ def unmapped_authors(conn: sqlite3.Connection) -> list[dict]:
     except sqlite3.OperationalError:
         pass  # no email backlog in this DB
     return rows
+
+
+def curated_aliases(conn: sqlite3.Connection) -> set[str]:
+    return {r["alias"] for r in conn.execute(
+        "SELECT alias FROM identity_aliases WHERE confidence='curated'")}
 
 
 def known_identities(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -485,11 +505,20 @@ def _backfill_identity(conn: sqlite3.Connection, alias: str, identity_id: str) -
     backlog that prompted the decision stays unmapped — which reads as the form not
     having worked.
     """
-    conn.execute(
-        "UPDATE web_backlog SET identity_id=?, updated_at=datetime('now') "
-        "WHERE identity_id IS NULL AND (site=? OR site LIKE ?)",
-        (identity_id, alias, f"%.{alias}"),
-    )
+    from pipeline.web.canonical import channel_key
+
+    # Matched per row on the channel key rather than by hostname: a `medium.com/@stewart`
+    # decision must not claim every other Medium article.
+    for r in conn.execute(
+        "SELECT fetch_hash, url, site FROM web_backlog WHERE identity_id IS NULL"
+    ).fetchall():
+        key = channel_key(r["url"]) or r["site"] or ""
+        host, root = (r["site"] or ""), (r["site"] or "").split(".", 1)[-1]
+        if key == alias or host == alias or (host.endswith("." + alias) and alias == root):
+            conn.execute(
+                "UPDATE web_backlog SET identity_id=?, updated_at=datetime('now') "
+                "WHERE fetch_hash=?", (identity_id, r["fetch_hash"]),
+            )
 
 
 def _page(body: str) -> str:

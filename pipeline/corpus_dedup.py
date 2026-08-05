@@ -263,6 +263,61 @@ def _voice(conn: sqlite3.Connection, att: dict) -> str | None:
     return att.get("identity") or authors.identity_of(conn, att.get("author")) or att.get("author")
 
 
+def resolve_provisional(
+    settings: Settings, conn: sqlite3.Connection, *, dry_run: bool = False
+) -> list[tuple[str, str]]:
+    """Upgrade attestations whose channel has since been given an author.
+
+    Mapping an author in the dashboard fixes FUTURE comparisons, because identity is
+    resolved from the stored key at comparison time. It does not touch notes already
+    written: those still carry `provisional: true` and were never counted as support. So
+    deciding who wrote something has no effect on the corpus until this runs — which makes
+    it the other half of the mapping workflow, not an optional tidy-up.
+
+    Returns the (claim_id, identity_id) pairs upgraded.
+    """
+    vault = VaultWriter(settings.vault_dir)
+    upgraded: list[tuple[str, str]] = []
+    for path in sorted((vault.root / "corpus/claims").glob("*.md")):
+        post = read_note(path)
+        meta = dict(post.metadata)
+        atts = list(meta.get("attestations") or [])
+        changed = False
+        for a in atts:
+            if not a.get("provisional"):
+                continue
+            ident = authors.identity_of(conn, a.get("author"))
+            if not ident:
+                continue
+            a["identity"] = ident
+            a.pop("provisional", None)
+            changed = True
+            upgraded.append((path.stem, ident))
+        if changed and not dry_run:
+            meta["attestations"] = atts
+            vault.write_note(f"corpus/claims/{path.stem}.md", meta,
+                             _rebuild_note_body(post.content, meta))
+    if not dry_run and upgraded:
+        conn.commit()
+        vault.commit(f"[identity] upgraded {len(upgraded)} provisional attestation(s)")
+    return upgraded
+
+
+def _rebuild_note_body(content: str, meta: dict) -> str:
+    """Regenerate a claim note body from frontmatter (headline + attestations + alts)."""
+    headline = (content.strip().splitlines() or [""])[0].lstrip("#").strip()
+    body = f"# {headline}\n\n## Attestations\n\n"
+    for a in meta.get("attestations") or []:
+        who = a.get("identity") or a.get("author") or a.get("source_url") or "—"
+        mark = " *(provisional)*" if a.get("provisional") else ""
+        body += (f"- **{who}**{mark} `{(a.get('source_hash') or '')[:12]}` — "
+                 f"\"{a.get('quote', '')}\" [{a.get('date', '')}]\n")
+    alts = meta.get("alternate_phrasings") or []
+    if alts:
+        body += "\n## Alternate phrasings\n\n" + "".join(f"- {x}\n" for x in alts)
+    return body
+
+
 def recount_attestations(
     settings: Settings, conn: sqlite3.Connection, *, dry_run: bool = False
 ) -> list[tuple[str, int, int]]:

@@ -75,6 +75,31 @@ def site_of(url: str | None) -> str | None:
     return host or None
 
 
+def channel_key(url: str | None) -> str | None:
+    """The finest STABLE key identifying who publishes at a URL.
+
+    For an ordinary site the hostname is the channel — one blog, one voice. On a shared
+    platform it is not: medium.com hosts everybody, so keying on the host would fuse every
+    Medium writer into one identity. That is worse than the false-corroboration bug this
+    layer exists to prevent, because it merges distinct PEOPLE rather than inflating a
+    count.
+
+    So on a platform the first path segment is included when it identifies a publisher:
+    `medium.com/@stewart` is a stable author key and reusable for their next piece. A
+    publication path (`medium.com/firm-narrative`) is a publication, not an author — still
+    far better than the bare host, and the byline decides the rest.
+    """
+    if not url:
+        return None
+    host = site_of(url)
+    if not host:
+        return None
+    if host not in SHARED_PLATFORMS:
+        return host
+    seg = next((s for s in urlsplit(url).path.split("/") if s), None)
+    return f"{host}/{seg}" if seg else host
+
+
 def registrable(host: str | None) -> str | None:
     """Approximate registrable domain: the last two labels.
 

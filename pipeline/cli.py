@@ -883,6 +883,37 @@ def identity_unmapped() -> None:
         typer.echo("    pipeline identity set <host> '<Name>' --id person:<slug>")
 
 
+@identity_app.command("apply")
+def identity_apply(
+    apply_: bool = typer.Option(False, "--apply", help="Write the upgrades."),
+) -> None:
+    """Upgrade provisional attestations whose channel now has an author, then recount.
+
+    The other half of mapping an author: deciding who wrote something fixes future
+    comparisons, but notes already written keep `provisional: true` and are still not
+    counted as support until this runs.
+    """
+    from pipeline import corpus_dedup
+
+    settings = _settings()
+    conn = _conn(settings)
+    upgraded = corpus_dedup.resolve_provisional(settings, conn, dry_run=not apply_)
+    if not upgraded:
+        typer.secho("no provisional attestations are resolvable yet", fg="green")
+        return
+    by_ident: dict[str, int] = {}
+    for _claim, ident in upgraded:
+        by_ident[ident] = by_ident.get(ident, 0) + 1
+    typer.secho(f"{len(upgraded)} attestation(s) upgradeable:", fg="yellow", bold=True)
+    for ident, n in sorted(by_ident.items(), key=lambda kv: -kv[1]):
+        typer.echo(f"  {ident:<40} {n}")
+    if not apply_:
+        typer.secho("\ndry run — re-run with --apply", fg="cyan")
+        return
+    changed = corpus_dedup.recount_attestations(settings, conn)
+    typer.secho(f"applied; {len(changed)} claim(s) changed corroboration count", fg="green")
+
+
 @identity_app.command("list")
 def identity_list(
     proposed: bool = typer.Option(False, "--proposed", help="Only unconfirmed rows."),
