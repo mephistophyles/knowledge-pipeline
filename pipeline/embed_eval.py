@@ -21,6 +21,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
+from pipeline import batch_guard
 from pipeline.config import Settings
 from pipeline.db import claims_index, vec_index
 from pipeline.llm import Message, prompts, registry
@@ -57,6 +58,7 @@ class SweepResult:
     table: str
     dims: int
     claims: int
+    stopped_early: bool = False
     points: list[SweepPoint] = field(default_factory=list)
     merged_at: dict[float, set[tuple[str, str]]] = field(default_factory=dict)
 
@@ -91,6 +93,7 @@ def embed_corpus(
 def sweep(
     settings: Settings, conn: sqlite3.Connection, *, table: str, model: str,
     thresholds: list[float], shortlist_k: int = 5, workers: int = 8, progress=None,
+    on_estimate=None, confirm=None,
 ) -> SweepResult:
     """Candidate pairs and judgments at each threshold, over `table`'s vectors."""
     mc = settings.stage_model("dedup")
@@ -153,9 +156,25 @@ def sweep(
         return pair, _parse_same(out.text)
 
     if todo:
+        est = batch_guard.estimate(
+            len(todo), rate_key="dedup_confirm_parallel", usd_per_call=0.0002,
+            label=f"sweep/{model}",
+        )
+        if on_estimate:
+            on_estimate(est)
+        if confirm and not confirm(est):
+            return result
+
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [pool.submit(_judge, p) for p in todo]
             for fut in as_completed(futures):
+                # Wind up cleanly when asked. Cancelling the pending futures rather than
+                # draining them is what makes a closed laptop cost seconds, not the run.
+                if batch_guard.should_stop(settings.root, conn):
+                    for f2 in futures:
+                        f2.cancel()
+                    result.stopped_early = True
+                    break
                 try:
                     pair, same = fut.result()
                 except Exception:

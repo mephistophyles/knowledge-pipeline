@@ -476,6 +476,26 @@ def release(ref: str = typer.Argument(..., help="Release a held artifact.")) -> 
     typer.secho(f"released {h[:12]} ({n} stage row(s))", fg="green")
 
 
+@app.command("stop")
+def stop_batches(
+    clear: bool = typer.Option(False, "--clear", help="Cancel the stop request instead."),
+) -> None:
+    """Ask any running batch to finish its current item and exit.
+
+    For closing the laptop. Long runs check this between items and wind up cleanly, so
+    progress already committed is kept and the work resumes from cache.
+    """
+    from pipeline import batch_guard
+
+    settings = _settings()
+    if clear:
+        batch_guard.clear_stop(settings.root)
+        typer.secho("stop request cleared", fg="green")
+        return
+    p = batch_guard.request_stop(settings.root)
+    typer.secho(f"stop requested ({p}) — running batches will wind up shortly", fg="yellow")
+
+
 @app.command("recount")
 def recount(
     apply_: bool = typer.Option(False, "--apply", help="Write the corrected counts."),
