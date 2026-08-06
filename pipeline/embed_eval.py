@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from pipeline.config import Settings
@@ -87,35 +88,9 @@ def embed_corpus(
     return len(rows), dims
 
 
-def _verdict(
-    settings: Settings, conn: sqlite3.Connection, a_text: str, b_text: str, mc, prompt: str
-) -> tuple[bool, bool]:
-    """(same, was_new). Reuses the cache the threshold sweeps already populated."""
-    hit = conn.execute(
-        "SELECT same FROM dedup_verdicts WHERE prompt_version=? AND model=? "
-        "AND claim_a=? AND claim_b=?",
-        (mc.prompt_version, mc.model, a_text, b_text),
-    ).fetchone()
-    if hit is not None:
-        return bool(hit["same"]), False
-    provider = registry.get_provider(settings, mc.provider)
-    out = provider.complete(
-        [Message("system", prompt), Message("user", f"A: {a_text}\nB: {b_text}")],
-        mc.model, mc.params,
-    )
-    same = _parse_same(out.text)
-    conn.execute(
-        "INSERT OR REPLACE INTO dedup_verdicts"
-        "(prompt_version, model, claim_a, claim_b, same, distance) VALUES(?,?,?,?,?,NULL)",
-        (mc.prompt_version, mc.model, a_text, b_text, int(same)),
-    )
-    conn.commit()
-    return same, True
-
-
 def sweep(
     settings: Settings, conn: sqlite3.Connection, *, table: str, model: str,
-    thresholds: list[float], shortlist_k: int = 5, progress=None,
+    thresholds: list[float], shortlist_k: int = 5, workers: int = 8, progress=None,
 ) -> SweepResult:
     """Candidate pairs and judgments at each threshold, over `table`'s vectors."""
     mc = settings.stage_model("dedup")
@@ -148,14 +123,56 @@ def sweep(
             seen.add(key)
             candidates.append((key[0], key[1], hit["distance"]))
 
-    judged: dict[tuple[str, str], bool] = {}
+    # Judged in PARALLEL. Confirm calls are independent of one another, so running them
+    # serially made this an 8-hour job at ~15 verdicts/min; `warm_cache` already
+    # established the pattern at ~10x. Every DB write stays on this thread — the sqlite
+    # connection is not shared across threads.
+    cached: dict[tuple[str, str], bool] = {}
+    todo: list[tuple[str, str]] = []
+    for a, b, _dist in candidates:
+        hit = conn.execute(
+            "SELECT same FROM dedup_verdicts WHERE prompt_version=? AND model=? "
+            "AND claim_a=? AND claim_b=?",
+            (mc.prompt_version, mc.model, texts[a], texts[b]),
+        ).fetchone()
+        if hit is None:
+            todo.append((a, b))
+        else:
+            cached[(a, b)] = bool(hit["same"])
+
+    provider = registry.get_provider(settings, mc.provider)
+    judged: dict[tuple[str, str], bool] = dict(cached)
     new_calls = 0
-    for i, (a, b, dist) in enumerate(candidates):
-        same, was_new = _verdict(settings, conn, texts[a], texts[b], mc, prompt)
-        judged[(a, b)] = same
-        new_calls += int(was_new)
-        if progress:
-            progress(i + 1, len(candidates), new_calls)
+
+    def _judge(pair):
+        a, b = pair
+        out = provider.complete(
+            [Message("system", prompt), Message("user", f"A: {texts[a]}\nB: {texts[b]}")],
+            mc.model, mc.params,
+        )
+        return pair, _parse_same(out.text)
+
+    if todo:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_judge, p) for p in todo]
+            for fut in as_completed(futures):
+                try:
+                    pair, same = fut.result()
+                except Exception:
+                    continue          # a failed judgment is simply not counted
+                judged[pair] = same
+                conn.execute(
+                    "INSERT OR REPLACE INTO dedup_verdicts"
+                    "(prompt_version, model, claim_a, claim_b, same, distance) "
+                    "VALUES(?,?,?,?,?,NULL)",
+                    (mc.prompt_version, mc.model, texts[pair[0]], texts[pair[1]], int(same)),
+                )
+                new_calls += 1
+                if new_calls % 25 == 0:
+                    conn.commit()
+                if progress:
+                    progress(len(cached) + new_calls, len(candidates), new_calls)
+        conn.commit()
 
     for t in sorted(thresholds):
         pt = SweepPoint(threshold=t)
@@ -163,6 +180,8 @@ def sweep(
         for a, b, dist in candidates:
             if dist > t:
                 continue
+            if (a, b) not in judged:
+                continue          # judgment failed; not counted either way
             pt.pairs += 1
             if judged[(a, b)]:
                 pt.same += 1

@@ -264,7 +264,8 @@ def _voice(conn: sqlite3.Connection, att: dict) -> str | None:
 
 
 def resolve_provisional(
-    settings: Settings, conn: sqlite3.Connection, *, dry_run: bool = False
+    settings: Settings, conn: sqlite3.Connection, *, dry_run: bool = False,
+    alias: str | None = None, commit_vault: bool = True,
 ) -> list[tuple[str, str]]:
     """Upgrade attestations whose channel has since been given an author.
 
@@ -286,6 +287,11 @@ def resolve_provisional(
         for a in atts:
             if not a.get("provisional"):
                 continue
+            # Scoped to one alias when the caller just decided that mapping: a save in the
+            # dashboard should not rewrite notes belonging to unrelated authors, and the
+            # cost of this walk grows with the corpus (0.6s at 1,583 notes, linear).
+            if alias is not None and (a.get("author") or "").lower() != alias.lower():
+                continue
             ident = authors.identity_of(conn, a.get("author"))
             if not ident:
                 continue
@@ -299,7 +305,9 @@ def resolve_provisional(
                              _rebuild_note_body(post.content, meta))
     if not dry_run and upgraded:
         conn.commit()
-        vault.commit(f"[identity] upgraded {len(upgraded)} provisional attestation(s)")
+        if commit_vault:
+            who = f" for {alias}" if alias else ""
+            vault.commit(f"[identity] upgraded {len(upgraded)} provisional attestation(s){who}")
     return upgraded
 
 

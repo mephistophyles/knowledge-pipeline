@@ -478,7 +478,7 @@ def authors_map(
     firm's blog, and as a guest elsewhere.
     """
     from pipeline import authors as A
-    from pipeline import identity_seed
+    from pipeline import corpus_dedup, identity_seed
 
     settings = Settings.load()
     conn = _rw_conn(settings)
@@ -495,6 +495,12 @@ def authors_map(
             settings, conn, identity_id=identity_id, name=name, kind=kind, alias=alias
         )
         _backfill_identity(conn, alias, identity_id)
+        # Take effect immediately, scoped to this alias. Deciding who wrote something and
+        # having the corpus still say "provisional" is a surprise, not a workflow — and it
+        # costs ~0.6s over 1,583 notes, so there is no reason to defer it.
+        upgraded = corpus_dedup.resolve_provisional(settings, conn, alias=alias)
+        if upgraded:
+            corpus_dedup.recount_attestations(settings, conn)
     return RedirectResponse("/authors", status_code=303)
 
 

@@ -216,3 +216,52 @@ def test_resolve_provisional_dry_run_writes_nothing(settings, conn, fake_claims)
     assert corpus_dedup.resolve_provisional(settings, conn, dry_run=True)
     note = settings.vault_dir / f"corpus/claims/claim-{h[:8]}-00.md"
     assert read_note(note).metadata["attestations"][0]["provisional"] is True
+
+
+def test_saving_takes_effect_immediately_on_the_corpus(settings, conn, fake_claims, monkeypatch):
+    """Deciding who wrote something and having the corpus still say 'provisional' is a
+    surprise, not a workflow."""
+    from pipeline.ingestors.email import ingest_message
+    from pipeline.orchestrator.executor import run_stage
+    from pipeline.vault.writer import read_note
+
+    from .conftest import FakeMsg
+
+    fake_claims["text"] = '[{"claim": "A claim.", "quote": "q"}]'
+    h = ingest_message(settings, conn, FakeMsg(text="ed", from_="writer@example.com", subject="S"))
+    for stage in ("source_note", "extract_claims", "dedup"):
+        run_stage(settings, conn, h, stage)
+    note = settings.vault_dir / f"corpus/claims/claim-{h[:8]}-00.md"
+    assert read_note(note).metadata["attestations"][0]["provisional"] is True
+
+    _client(settings, monkeypatch).post(
+        "/authors/map",
+        data={"alias": "writer@example.com", "identity_id": "", "name": "A Writer", "kind": "person"},
+    )
+
+    att = read_note(note).metadata["attestations"][0]
+    assert att["identity"] == "person:a-writer" and "provisional" not in att
+
+
+def test_saving_one_alias_does_not_rewrite_another_authors_notes(settings, conn, fake_claims, monkeypatch):
+    from pipeline.ingestors.email import ingest_message
+    from pipeline.orchestrator.executor import run_stage
+    from pipeline.vault.writer import read_note
+
+    from .conftest import FakeMsg
+
+    hashes = {}
+    for who in ("one@example.com", "two@example.com"):
+        fake_claims["text"] = f'[{{"claim": "Claim from {who}.", "quote": "q"}}]'
+        h = ingest_message(settings, conn, FakeMsg(text=f"ed {who}", from_=who, subject="S"))
+        for stage in ("source_note", "extract_claims", "dedup"):
+            run_stage(settings, conn, h, stage)
+        hashes[who] = h
+
+    _client(settings, monkeypatch).post(
+        "/authors/map",
+        data={"alias": "one@example.com", "identity_id": "", "name": "One", "kind": "person"},
+    )
+
+    other = read_note(settings.vault_dir / f"corpus/claims/claim-{hashes['two@example.com'][:8]}-00.md")
+    assert other.metadata["attestations"][0]["provisional"] is True   # untouched
