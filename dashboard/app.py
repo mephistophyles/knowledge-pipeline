@@ -209,7 +209,7 @@ def index(
             "conn": conn,
             "stop_requested": batch_guard.should_stop(Settings.load().root),
         }
-    return _page(_render_overview(ctx))
+    return _page(_render_overview(ctx), refresh_seconds=15 if ctx.get("batches") else None)
 
 
 @app.get("/artifact/{artifact_hash}", response_class=HTMLResponse)
@@ -603,8 +603,11 @@ def _backfill_identity(conn: sqlite3.Connection, alias: str, identity_id: str) -
             )
 
 
-def _page(body: str) -> str:
-    return f"""<!doctype html><meta charset=utf-8>
+def _page(body: str, refresh_seconds: int | None = None) -> str:
+    # Auto-refresh ONLY while a batch is running. Polling a static page by hand is what
+    # the operator was doing instead; refreshing a quiet page forever would just be noise.
+    meta = f"\n<meta http-equiv=refresh content={refresh_seconds}>" if refresh_seconds else ""
+    return f"""<!doctype html><meta charset=utf-8>{meta}
 <title>knowledge-pipeline</title>
 <style>body{{font:14px/1.5 system-ui;margin:2rem;max-width:960px}}
 h2{{margin-top:1.5rem;font-size:1rem;color:#555}}

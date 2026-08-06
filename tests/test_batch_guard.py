@@ -133,3 +133,21 @@ def test_units_must_match_between_total_and_tick(settings, conn):
     bg.tick(conn, "b", 1801)
     eta = bg.eta_minutes(bg.running(conn)[0])
     assert 30 < eta < 40          # (6411-1801)/136
+
+
+def test_the_overview_auto_refreshes_only_while_a_batch_runs(settings, conn, monkeypatch):
+    """Polling by hand is what the operator was reduced to; refreshing a quiet page
+    forever would just be noise."""
+    from fastapi.testclient import TestClient
+
+    from dashboard import app as dash
+
+    monkeypatch.setattr(dash.Settings, "load", staticmethod(lambda: settings))
+    client = TestClient(dash.app)
+    assert "http-equiv=refresh" not in client.get("/").text
+
+    bg.start(conn, "b", "judge", 100, rate_key="dedup_confirm_parallel")
+    assert "http-equiv=refresh" in client.get("/").text
+
+    bg.finish(conn, "b")
+    assert "http-equiv=refresh" not in client.get("/").text
