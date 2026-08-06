@@ -97,3 +97,102 @@ def should_stop(root: Path, conn: sqlite3.Connection | None = None) -> bool:
         except sqlite3.OperationalError:
             return False
     return False
+
+
+# ── visibility ────────────────────────────────────────────────────────────────
+def start(conn: sqlite3.Connection, batch_id: str, label: str, total: int,
+          *, rate_key: str = "", note: str = "", workflow: str = "",
+          step: int = 1, steps_total: int = 1) -> str:
+    """Register a batch so the dashboard can show it while it runs.
+
+    `total` and the value passed to `tick` MUST be in the same units. They were not on the
+    first live run — total counted candidate pairs while done counted LLM calls — and the
+    resulting ETA was meaningless. Both are now "units of work this task will actually do".
+
+    `workflow` groups tasks that the operator thinks of as one job. The bake-off is one job
+    to a person and four tasks to the machine, and quoting one task's remaining time as if
+    it were the whole run is how two contradictory estimates get reported.
+    """
+    conn.execute(
+        "INSERT INTO batches(batch_id, label, total, done, rate_key, state, note, "
+        "workflow, step, steps_total) "
+        "VALUES(?,?,?,0,?, 'running', ?,?,?,?) ON CONFLICT(batch_id) DO UPDATE SET "
+        "label=excluded.label, total=excluded.total, done=0, state='running', "
+        "note=excluded.note, workflow=excluded.workflow, step=excluded.step, "
+        "steps_total=excluded.steps_total, started_at=datetime('now'), "
+        "updated_at=datetime('now')",
+        (batch_id, label, total, rate_key, note, workflow or None, step, steps_total),
+    )
+    conn.commit()
+    return batch_id
+
+
+def tick(conn: sqlite3.Connection, batch_id: str, done: int, *, usd: float = 0.0) -> None:
+    conn.execute(
+        "UPDATE batches SET done=?, usd=?, updated_at=datetime('now') WHERE batch_id=?",
+        (done, usd, batch_id),
+    )
+    conn.commit()
+
+
+def finish(conn: sqlite3.Connection, batch_id: str, state: str = "done") -> None:
+    conn.execute(
+        "UPDATE batches SET state=?, updated_at=datetime('now') WHERE batch_id=?",
+        (state, batch_id),
+    )
+    conn.commit()
+
+
+def running(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Batches that claim to be running, newest first.
+
+    A row is only a claim: a process killed outright cannot mark itself stopped, so the
+    dashboard shows how stale the heartbeat is rather than asserting the job is alive.
+    """
+    try:
+        return conn.execute(
+            "SELECT *, CAST((julianday('now') - julianday(updated_at)) * 86400 AS INTEGER) "
+            "AS stale_seconds FROM batches WHERE state='running' ORDER BY started_at DESC"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+
+def eta_minutes(row: sqlite3.Row) -> float | None:
+    total, done = row["total"] or 0, row["done"] or 0
+    rate = RATES.get(row["rate_key"] or "")
+    if not rate or total <= done:
+        return None
+    return (total - done) / rate
+
+
+def workflow_eta(conn: sqlite3.Connection, workflow: str) -> dict:
+    """Remaining time for a WHOLE workflow, not just the task in flight.
+
+    Steps not yet started have no measured size, so their cost is projected from the
+    average of the steps already sized. That is explicitly a projection, and is reported
+    separately from the running task's remaining time so the two are never conflated.
+    """
+    rows = conn.execute(
+        "SELECT * FROM batches WHERE workflow=? ORDER BY step", (workflow,)
+    ).fetchall()
+    if not rows:
+        return {}
+    current = next((r for r in rows if r["state"] == "running"), None)
+    task_min = eta_minutes(current) if current is not None else 0.0
+
+    sized = [r for r in rows if (r["total"] or 0) > 0]
+    avg_total = sum(r["total"] for r in sized) / len(sized) if sized else 0
+    steps_total = max((r["steps_total"] or 1) for r in rows)
+    remaining_steps = max(0, steps_total - len(rows))
+    rate = RATES.get((current or rows[-1])["rate_key"] or "", 60.0)
+    projected = (remaining_steps * avg_total / rate) if rate else 0.0
+
+    return {
+        "task": current["label"] if current is not None else None,
+        "task_minutes": task_min or 0.0,
+        "workflow_minutes": (task_min or 0.0) + projected,
+        "steps_done": sum(1 for r in rows if r["state"] == "done"),
+        "steps_total": steps_total,
+        "projected_steps": remaining_steps,
+    }

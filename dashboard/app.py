@@ -23,6 +23,7 @@ from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from dashboard import executor
+from pipeline import batch_guard
 from pipeline.config import Settings
 from pipeline.db import bootstrap, jobs, registry
 
@@ -204,6 +205,9 @@ def index(
             "page": max(page, 1),
             "total": registry.count(conn, filters=filters),
             "unregistered": registry.unregistered_count(conn),
+            "batches": batch_guard.running(conn),
+            "conn": conn,
+            "stop_requested": batch_guard.should_stop(Settings.load().root),
         }
     return _page(_render_overview(ctx))
 
@@ -246,6 +250,8 @@ def _filter_bar(facets: dict, filters: dict) -> str:
 
 def _render_overview(ctx: dict) -> str:
     counts, matrix, costs = ctx["counts"], ctx["matrix"], ctx["costs"]
+    batches_html = _render_batches(ctx.get("batches") or [], ctx.get("stop_requested", False),
+                                   ctx.get("conn"))
     arts, filters = ctx["arts"], ctx["filters"]
 
     badges = " ".join(
@@ -290,6 +296,7 @@ def _render_overview(ctx: dict) -> str:
 
     return f"""<h1>knowledge-pipeline <span class=live>● live</span></h1>
 <p>{badges}</p>
+{batches_html}
 <h2>backlog by stage</h2>
 <table><tr><th>stage</th>{''.join(f'<th>{c}</th>' for c in STATUS_COLS)}</tr>{mrows}</table>
 <h2>cost &amp; latency</h2>
@@ -344,6 +351,75 @@ def _read_output(path: str | None, limit: int = 6000) -> str:
     except Exception:
         text = p.read_text(errors="replace")
     return text[:limit] + ("\n… (truncated)" if len(text) > limit else "")
+
+
+# ── background batches ────────────────────────────────────────────────────────
+def _mins(m) -> str:
+    if not m:
+        return '—'
+    return f'{m:.0f} min' if m < 90 else f'{m / 60:.1f} h'
+
+
+def _render_batches(rows: list, stop_requested: bool, conn=None) -> str:
+    """Long-running work, where the operator actually looks.
+
+    A heartbeat is a claim, not proof: a process killed outright cannot mark itself
+    stopped, so staleness is shown rather than asserting the job is alive.
+    """
+    from pipeline import batch_guard
+
+    if not rows and not stop_requested:
+        return ""
+    out = ["<h2>background batches</h2>"]
+    if stop_requested:
+        out.append("<p class=nudge>STOP requested — running batches will wind up shortly. "
+                   "<form method=post action=/batches/stop style='display:inline'>"
+                   "<input type=hidden name=clear value=1>"
+                   "<button type=submit>cancel stop</button></form></p>")
+    if rows:
+        # Task remaining and WORKFLOW remaining are shown as separate columns. Conflating
+        # them is exactly how two contradictory estimates got reported for one run: the
+        # figure quoted was whichever task happened to be in flight.
+        out.append("<table><tr><th>workflow</th><th>task</th><th>progress</th>"
+                   "<th>task left</th><th>workflow left</th><th>spend</th>"
+                   "<th>heartbeat</th></tr>")
+        for r in rows:
+            total, done = r["total"] or 0, r["done"] or 0
+            pct = f"{done:,}/{total:,}" + (f" ({done * 100 // total}%)" if total else "")
+            task_eta = batch_guard.eta_minutes(r)
+            wf = r["workflow"] if "workflow" in r.keys() else None
+            wf_info = batch_guard.workflow_eta(conn, wf) if (wf and conn is not None) else {}
+            step = f"{r['step']}/{r['steps_total']}" if wf else "—"
+            stale = r["stale_seconds"] or 0
+            beat = f"{stale}s ago" + (" ⚠ stale" if stale > 120 else "")
+            out.append(
+                f"<tr><td>{html.escape(wf or '—')} <span class=dim>{step}</span></td>"
+                f"<td>{html.escape(r['label'])}</td><td>{pct}</td>"
+                f"<td>{_mins(task_eta)}</td>"
+                f"<td>{_mins(wf_info.get('workflow_minutes'))}</td>"
+                f"<td>${r['usd'] or 0:.2f}</td><td class=dim>{beat}</td></tr>"
+            )
+        out.append("</table>")
+        out.append("<p class=dim>task left = the step running now · workflow left = that "
+                   "plus a projection for steps not yet started</p>")
+        if not stop_requested:
+            out.append("<form method=post action=/batches/stop>"
+                       "<button type=submit>stop batches</button>"
+                       " <span class=dim>finishes the current item, keeps committed progress"
+                       "</span></form>")
+    return "\n".join(out)
+
+
+@app.post("/batches/stop")
+def batches_stop(clear: str = Form(default="")) -> RedirectResponse:
+    from pipeline import batch_guard
+
+    settings = Settings.load()
+    if clear:
+        batch_guard.clear_stop(settings.root)
+    else:
+        batch_guard.request_stop(settings.root)
+    return RedirectResponse("/", status_code=303)
 
 
 # ── unmapped authors queue ────────────────────────────────────────────────────

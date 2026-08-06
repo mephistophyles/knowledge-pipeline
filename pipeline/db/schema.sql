@@ -198,3 +198,22 @@ CREATE TABLE IF NOT EXISTS web_escalations (
   at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_escalation_cause ON web_escalations(cause);
+
+-- Running background work, so a long batch is visible where the operator actually looks
+-- rather than in a log file they have to be told about. Heartbeated by `batch_guard`.
+CREATE TABLE IF NOT EXISTS batches (
+  batch_id   TEXT PRIMARY KEY,
+  label      TEXT NOT NULL,
+  total      INTEGER,
+  done       INTEGER NOT NULL DEFAULT 0,
+  rate_key   TEXT,                                  -- which measured rate estimates the ETA
+  usd        REAL NOT NULL DEFAULT 0,
+  state      TEXT NOT NULL DEFAULT 'running',       -- running | done | stopped | failed
+  note       TEXT,
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_batches_state ON batches(state);
+
+-- Workflow grouping for batches is applied by the additive migration in connection.py
+-- (ALTER has no IF NOT EXISTS, and this file is executed on every bootstrap).

@@ -164,6 +164,9 @@ def sweep(
             on_estimate(est)
         if confirm and not confirm(est):
             return result
+        batch_id = f"sweep:{model}"
+        batch_guard.start(conn, batch_id, f"sweep/{model}", len(todo),
+                          rate_key="dedup_confirm_parallel")
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [pool.submit(_judge, p) for p in todo]
@@ -189,9 +192,12 @@ def sweep(
                 new_calls += 1
                 if new_calls % 25 == 0:
                     conn.commit()
+                    batch_guard.tick(conn, batch_id, new_calls,
+                                     usd=new_calls * 0.0002)
                 if progress:
                     progress(len(cached) + new_calls, len(candidates), new_calls)
         conn.commit()
+        batch_guard.finish(conn, batch_id, "stopped" if result.stopped_early else "done")
 
     for t in sorted(thresholds):
         pt = SweepPoint(threshold=t)
