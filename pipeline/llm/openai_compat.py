@@ -67,10 +67,33 @@ class OpenAICompatProvider:
             latency_ms=latency_ms,
         )
 
-    def embed(self, texts: list[str], model: str) -> Embeddings:
+    def embed(self, texts: list[str], model: str, *, input_type: str | None = None) -> Embeddings:
+        """Embed texts, optionally declaring how they will be used.
+
+        Asymmetric embedders (NVIDIA, Cohere, Voyage) are trained with distinct modes for
+        documents being indexed and for search queries, and the mode is baked into the
+        vector. Claim-to-claim dedup is SYMMETRIC, so both sides must be embedded the same
+        way — as passages.
+
+        Omitting it is not a safe default. Measured on nemotron-3-embed-1b, the
+        no-parameter vector is nearly orthogonal to both real modes (cosine 0.27 / 0.25,
+        where passage-vs-query is 0.80), and dedup ranking collapsed to AUC 0.332 —
+        WORSE than chance, reliably rating true duplicates as further apart. With
+        `passage` the same model reaches 0.936. A whole bake-off was run against the
+        unconditioned mode before this was noticed.
+        """
         t0 = time.monotonic()
+        # Sent via extra_body, NOT as a keyword: the OpenAI SDK's create() has a fixed
+        # signature and rejects unknown kwargs with TypeError. An earlier version caught
+        # that and "helpfully" retried without the field — so input_type never reached the
+        # API, and an entire threshold study silently measured the unconditioned mode.
+        # A fallback that hides a misconfiguration is worse than a crash. Servers that do
+        # not know the field ignore it in the body, which is the tolerance we actually want.
+        extra = {"input_type": input_type} if input_type else None
         try:
-            resp = self._client.embeddings.create(model=model, input=texts)
+            resp = self._client.embeddings.create(
+                model=model, input=texts, **({"extra_body": extra} if extra else {})
+            )
         except Exception as e:
             raise LLMError(f"{self.name}/{model} (embed): {e}") from e
         latency_ms = int((time.monotonic() - t0) * 1000)

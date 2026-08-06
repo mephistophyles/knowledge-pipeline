@@ -148,7 +148,8 @@ def dedup(ctx: StageContext) -> str:
             continue
         quote = (c.get("quote") or "").strip()
 
-        emb = emb_provider.embed([text], emb_cfg["model"])
+        emb = emb_provider.embed([text], emb_cfg["model"],
+                                 input_type=emb_cfg.get("input_type"))
         costs.record(
             ctx.conn, ctx.artifact_hash, "dedup:embed", emb.model, emb.tokens, 0, emb.usd,
             provider=emb.provider, latency_ms=emb.latency_ms,

@@ -127,6 +127,10 @@ models:
 embeddings:
   provider: ollama
   model: nomic-embed-text
+  # Asymmetric embedders bake the usage mode into the vector, and claim-to-claim dedup is
+  # symmetric — so both sides are embedded as passages. Providers that don't accept the
+  # field ignore it. Omitting it on nemotron measured WORSE than chance (AUC 0.332).
+  input_type: passage
 
 # Dedup tuning: a candidate matches an existing claim when its nearest neighbour's
 # L2 distance (unit-normalized embeddings) is below max_distance; the top-k

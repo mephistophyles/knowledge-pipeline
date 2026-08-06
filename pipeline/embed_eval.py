@@ -65,7 +65,7 @@ class SweepResult:
 
 def embed_corpus(
     settings: Settings, conn: sqlite3.Connection, *, provider_name: str, model: str,
-    table: str, batch: int = 32, progress=None,
+    table: str, batch: int = 32, input_type: str | None = None, progress=None,
 ) -> tuple[int, int]:
     """Embed every live claim into `table`. Returns (claims, dims).
 
@@ -79,7 +79,7 @@ def embed_corpus(
     dims = 0
     for i in range(0, len(rows), batch):
         chunk = rows[i:i + batch]
-        emb = provider.embed([r["text"] for r in chunk], model)
+        emb = provider.embed([r["text"] for r in chunk], model, input_type=input_type)
         for row, vec in zip(chunk, emb.vectors):
             v = _normalize(vec)
             dims = len(v)
