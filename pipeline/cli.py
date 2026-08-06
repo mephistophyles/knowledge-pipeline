@@ -476,6 +476,40 @@ def release(ref: str = typer.Argument(..., help="Release a held artifact.")) -> 
     typer.secho(f"released {h[:12]} ({n} stage row(s))", fg="green")
 
 
+@app.command("reembed")
+def reembed_cmd(
+    apply_: bool = typer.Option(False, "--apply", help="Rebuild the indexes."),
+) -> None:
+    """Rebuild the vector indexes with the configured embedder.
+
+    Required after changing `embeddings.model`: a vec0 table is fixed-width, so a new
+    dimensionality cannot be written into the old index — and mixing embedders would not
+    error, it would silently make L2 distances incomparable. Vectors are derived data;
+    `claims.text` is stored, so this is always reversible.
+    """
+    from pipeline import reembed
+
+    settings = _settings()
+    conn = _conn(settings)
+
+    def show(kind, done, total):
+        if done % 320 == 0 or done == total:
+            typer.echo(f"  {kind}: {done}/{total}")
+
+    info = reembed.rebuild(settings, conn, dry_run=not apply_, progress=show)
+    typer.echo(f"embedder: {info['model']} (input_type={info['input_type']}) → {info['dims']} dims")
+    typer.echo(f"claims: {info['claims']}   entities: {info['entities']}")
+    if not apply_:
+        typer.secho("dry run — re-run with --apply to rebuild", fg="cyan")
+        return
+    typer.secho(
+        f"rebuilt: {info['indexed_claims']} claim vectors, "
+        f"{info['indexed_entities']} entity vectors", fg="green",
+    )
+    typer.secho("thresholds are embedder-specific — confirm dedup.max_distance suits this "
+                "model before the next run", fg="yellow")
+
+
 @app.command("stop")
 def stop_batches(
     clear: bool = typer.Option(False, "--clear", help="Cancel the stop request instead."),

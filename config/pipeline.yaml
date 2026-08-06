@@ -125,8 +125,14 @@ models:
 # Write-time dedup embeddings (plan §6.3). Same provider layer as completions —
 # nomic-embed-text runs locally on Ollama (keyless, free).
 embeddings:
-  provider: ollama
-  model: nomic-embed-text
+  # Cloud embedder as of 2026-08-06, replacing local Ollama nomic-embed-text. Chosen on a
+  # threshold study over 13,244 labelled pairs from the live corpus: at every matched
+  # merge count it proposes roughly HALF the candidate pairs for the same or better yield,
+  # and precision runs 1.6-2.4x higher. It also removes the last local dependency from the
+  # derivation chain, which is what lets the pipeline run on a t3.small that cannot host
+  # Ollama. Swapping back is a `pipeline reembed` away — claims.text is stored.
+  provider: nvidia
+  model: nvidia/nemotron-3-embed-1b
   # Asymmetric embedders bake the usage mode into the vector, and claim-to-claim dedup is
   # symmetric — so both sides are embedded as passages. Providers that don't accept the
   # field ignore it. Omitting it on nemotron measured WORSE than chance (AUC 0.332).
@@ -139,7 +145,14 @@ embeddings:
 # dedup-OFF (near-verbatim only); 0.72 ≈ cosine 0.74 catches reworded paraphrases while
 # the confirm LLM rejects far pairs. nomic beat mxbai/bge (equal quality, fewest confirms).
 #
-# POLICY (set 2026-07-30 from the pilot sweep): dedup_confirm v3 @ max_distance 0.72.
+# POLICY (set 2026-08-06): dedup_confirm v3 @ max_distance 0.95 on nemotron-3-embed-1b
+# (passage mode). L2 distances are NOT comparable across embedders, so the old 0.72 —
+# tuned for nomic — carries no meaning here; 0.95 was re-derived on the same labelled set.
+# At 0.95 it catches ~75 merges from 1,430 candidate pairs, roughly double the duplicates
+# production found at nomic/0.72 (~36 from ~969) for ~1.5x the confirm calls. Going to
+# 1.00 costs 48% more calls for 48% more merges and drops precision to 0.036 — the knee.
+#
+# PREVIOUS POLICY (2026-07-30, nomic): dedup_confirm v3 @ max_distance 0.72.
 # The sweep isolated the two levers on 1,868 pairs judged by BOTH prompts:
 #   threshold alone (v2, 0.65 -> 0.72): +103 merges
 #   prompt alone    (at 0.72, v3 -> v2): +119 merges
@@ -150,13 +163,16 @@ embeddings:
 # Known cost: v3 is strict enough to miss genuine synonyms (it split a 0.458-distance
 # pair differing only in stress/arousal and concentration/awareness).
 dedup:
-  max_distance: 0.72       # POLICY. Swept on the 1,213-claim pilot at v2/v3 x 0.65/0.72.
+  max_distance: 0.95       # POLICY, re-derived 2026-08-06 for nemotron-3-embed-1b (passage).
   shortlist_k: 5
 
 # Entity resolution tuning (plan §6.4): after an exact (name, entity_type) string
 # match, near matches within max_distance are confirmed by the entities model.
 entities:
-  max_distance: 0.6
+  # Also re-scaled for the new embedder: 0.6 was a nomic distance. Held proportional to the
+  # dedup move (0.72 -> 0.95) pending its own sweep, which needs labelled entity pairs we
+  # do not yet have — so this is a considered placeholder, not a measured threshold.
+  max_distance: 0.79
   shortlist_k: 5
 
 # Email ingestion (plan §4.1). IMAP, read-only, scoped by Gmail label. Credentials

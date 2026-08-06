@@ -126,6 +126,28 @@ detectable rather than silent.
 
 ---
 
+## Status (2026-08-06)
+
+Steps 1-5 are shipped. Identity is anchored to the person and curated in
+`config/identities.yaml` (67 identities), with the unmapped queue living in the
+dashboard at `/authors`. Fetch, snapshot import, extraction, and the quality gate are
+in place and were validated on a real 22-URL backlog: 21 archived, 1 escalated,
+20 extracted, 1 held as a paywall teaser (hbr.org, 59 words).
+
+Two findings worth carrying forward:
+
+- **Substack does NOT disallow us.** The earlier "37% of the corpus is off-limits"
+  finding was our bug — `RobotFileParser.read()` fetches robots.txt with urllib's
+  default UA, which Cloudflare 403s, and urllib reads a 403 as disallow-everything.
+  12 false refusals on the real backlog became 1 once robots.txt was fetched with our
+  own UA.
+- **Terms can be stricter than robots.txt.** Substack's ToS prohibits crawling even
+  where robots.txt permits it, which is why `pipeline web audit` reports the terms
+  clause verbatim and renders findings rather than verdicts.
+
+Still open: step 6 (the overlap acceptance test, needs deliberate email/web
+duplicates) and step 7 (read the escalation counter to settle browser-vs-form).
+
 ## Build sequence
 
 1. **Identity layer** — tables, `identity_of()`, switch attestation/batching/analytics,
