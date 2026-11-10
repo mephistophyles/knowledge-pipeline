@@ -136,13 +136,15 @@ new extraction model, which the model bake-off will probably trigger.
 
 Work is organized by **area** (ongoing, never "done") → **goal / project** (has an
 outcome, can finish), not by `~/Dev`. Repos attach to projects as an optional signal.
-Not every project is software, and not every repo is active. Initial scope:
+Not every project is software, and not every repo is active. Areas are a short, slowly
+changing list; projects move between them (e.g. a software project becoming a venture).
+The table below is the **initial seed, not an exhaustive list**:
 
 | Area | Projects / goals (initial) | Repos |
 |---|---|---|
-| Business portfolio | starting the businesses (one project per venture as they firm up) | — |
+| Business portfolio | one project per venture: stached, containqr (for now), more as they firm up | stached, containqr |
 | Online writing | writing (publication cadence as a goal) | — |
-| Software | knowledge-pipeline, stached, containqr, settled | the four repos |
+| Software | knowledge-pipeline, settled (the only pure software project at present) | knowledge-pipeline, settled |
 | Self-hosted apps (Tailscale) | the platform, plus month-close, text-yourself, … as child projects | month-close, text-yourself, … |
 | Consulting | the practice; the plumb site as a project | plumb |
 | Education | BSc (project); MIT MBA (goal, with an application project under it) | — |
@@ -325,5 +327,5 @@ Each step is independently shippable. The model bake-off runs in parallel and do
 2. ~~Derived block placement~~: decided, marked block (§4.3).
 3. ~~Scope of `work/`~~: decided, areas-first with the initial scope in §4.0.
 4. ~~Agent write-back~~: decided, strictly read-only; gated inbox for ingestion (§5.5).
-5. **Area for stached / containqr / settled:** placed under "Software" for now. Move any
-   that belong to the business portfolio.
+5. ~~Area for stached / containqr / settled~~: decided, stached and containqr under Business
+   portfolio (for now), settled under Software.
