@@ -123,10 +123,12 @@ history depend on them, and rewording a claim must not orphan its corroboration.
 claim note adds `aliases: [<claim text>]` and an H1 with the text, so search, link
 autocomplete and the graph all show the idea.
 
-This leaves the known open problem: IDs are still *positional* within an extraction run
-(see 379c297). Solving that is a prerequisite for any corpus-wide re-derivation under a
-new extraction model, which the model bake-off will probably trigger.
-**Decision needed (§8).**
+**Decided 2026-11-10: IDs are assigned once and kept by matching** (built on
+`feat/stable-claim-ids`). New claims get forward-only minted IDs (`c-000123`), and legacy
+IDs keep working. Re-deriving a source reconciles against its previous claims: matching
+is quote-first, with embedding + confirm as the fallback. Matched claims keep their IDs.
+Unmatched claims transfer to another attesting source or retire to
+`corpus/claims/retracted/`. Every decision is audited in `claim_history`.
 
 ---
 
@@ -321,9 +323,7 @@ Each step is independently shippable. The model bake-off runs in parallel and do
 
 ## 8. Decisions needed
 
-1. **Claim identity** (§3.3): fix positional IDs before the first corpus-wide re-extraction.
-   - Option one: content-hash IDs plus a redirect on rewording.
-   - Option two: keep positional IDs and require retract-then-rederive, as today.
+1. ~~Claim identity~~: decided, minted IDs + reconciliation by matching (§3.3).
 2. ~~Derived block placement~~: decided, marked block (§4.3).
 3. ~~Scope of `work/`~~: decided, areas-first with the initial scope in §4.0.
 4. ~~Agent write-back~~: decided, strictly read-only; gated inbox for ingestion (§5.5).
