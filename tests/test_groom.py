@@ -53,8 +53,11 @@ def test_apply_preserves_the_absorbed_phrasing_and_note(settings, conn, fake_cla
     assert corpus_dedup.apply_merges(settings, conn, plan) == 1
 
     survivor_id, absorbed_id, _ = plan.pairs[0]
+    # Both claims land in the same second, so which survives is decided by claim_id —
+    # which derives from per-run artifact hashes. Assert on whichever was absorbed.
+    absorbed_text = ci.get_claim(conn, absorbed_id)["text"]
     survivor = read_note(settings.vault_dir / f"corpus/claims/{survivor_id}.md")
-    assert "Taste is what sets software apart." in survivor.metadata["alternate_phrasings"]
+    assert absorbed_text in survivor.metadata["alternate_phrasings"]
     assert "Alternate phrasings" in survivor.content
     assert len(survivor.metadata["attestations"]) == 2  # both sources' quotes survive
 

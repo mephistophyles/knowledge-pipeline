@@ -1,9 +1,9 @@
-# Tier-1 control-box stack (plan §14.1). One `docker compose up` runs the whole
-# always-on box locally: orchestrator + workers + dashboard + litestream, all
-# against ./data/pipeline.db (the single SQLite writer boundary).
+# Portable stack: one `docker compose up` runs orchestrator + workers + dashboard +
+# litestream, all against ./data/pipeline.db (the single SQLite writer boundary).
 #
-# The GPU burst worker (tier 2) is NOT here — it's an ephemeral spot instance
-# launched on demand in build step 4.
+# Inference is NOT in this stack — it is the host's Ollama / llama-server. Note that
+# inside a container `localhost:11434` is the container, not the host; on halo we run
+# the pipeline under uv + systemd instead (see local-migration-playbook.md).
 
 x-app: &app
   build:
@@ -58,12 +58,12 @@ services:
     entrypoint: ["uvicorn"]
     command: ["dashboard.app:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
-      - "8000:8000"           # nginx fronts this on EC2 (plan §14.3); never exposed directly there
+      - "8000:8000"           # LAN only. The dashboard is a WRITE surface (authors form, stop) — never expose it publicly
     depends_on:
       init:
         condition: service_completed_successfully
 
-  # Continuous SQLite backup. Local: file replica (no AWS). EC2: swap to S3.
+  # Continuous SQLite backup. See docker/litestream.yml for the off-box replica.
   litestream:
     image: litestream/litestream:0.3
     volumes:

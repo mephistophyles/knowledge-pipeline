@@ -8,7 +8,6 @@ dependencies = [
     "typer>=0.12",
     "pyyaml>=6.0",
     "python-frontmatter>=1.1",
-    "boto3>=1.34",
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
     "jinja2>=3.1",
@@ -20,6 +19,10 @@ dependencies = [
     "python-multipart>=0.0.32",
     "trafilatura>=2.2.0",
 ]
+
+[project.optional-dependencies]
+# Only for `storage.blobstore: s3`. The pipeline runs fully local by default (no AWS).
+s3 = ["boto3>=1.34"]
 
 [project.scripts]
 pipeline = "pipeline.cli:app"

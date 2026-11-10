@@ -7,7 +7,7 @@ paths:
   vault: vault
 
 storage:
-  # The ONLY cloud-specific abstraction (plan §14). Flip to `s3` for EC2; nothing else changes.
+  # Local by default (no cloud). `s3` remains supported via `uv sync --extra s3`.
   blobstore: local        # local | s3
   local:
     root: data/raw        # content-addressed: <root>/sha256/ab/cd/<hash>/artifact.*
@@ -128,9 +128,10 @@ embeddings:
   # Cloud embedder as of 2026-08-06, replacing local Ollama nomic-embed-text. Chosen on a
   # threshold study over 13,244 labelled pairs from the live corpus: at every matched
   # merge count it proposes roughly HALF the candidate pairs for the same or better yield,
-  # and precision runs 1.6-2.4x higher. It also removes the last local dependency from the
-  # derivation chain, which is what lets the pipeline run on a t3.small that cannot host
-  # Ollama. Swapping back is a `pipeline reembed` away — claims.text is stored.
+  # and precision runs 1.6-2.4x higher. (It was also hosted because a t3.small could not
+  # host models — no longer the target: the same open weights run locally on halo, so the
+  # pending check is whether local vectors match these closely enough to keep 0.95.)
+  # Swapping is a `pipeline reembed` away — claims.text is stored.
   provider: nvidia
   model: nvidia/nemotron-3-embed-1b
   # Asymmetric embedders bake the usage mode into the vector, and claim-to-claim dedup is

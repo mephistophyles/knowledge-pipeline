@@ -45,9 +45,14 @@ source that repeats it.
 - **Compose stack** — one `docker compose up` runs the tier-1 box locally.
 
 **Not yet built:** the promote workflow (designed — see
-[Planned workflows](#planned-workflows)), email/RSS/YouTube/web ingestors, the
-audio chain + GPU burst, claim↔entity linking, and the dashboard control plane.
-AWS provisioning lives in [`infra/`](infra/) (Terraform).
+[Planned workflows](#planned-workflows)), podcast/RSS and YouTube ingestors, the
+audio chain, and claim↔entity linking.
+
+**Deployment is local hardware, no cloud** (decided 2026-11): an always-on Linux box
+with a 128 GB AMD Strix Halo APU (`halo`) runs the workers, the dashboard, and local
+inference (Ollama / llama.cpp); a Mac is the dev machine. Hosted APIs (NVIDIA,
+OpenRouter) remain configured as fallbacks. See
+[`local-migration-playbook.md`](local-migration-playbook.md).
 
 ## How it works
 
@@ -97,9 +102,12 @@ instance environment on the box).
 | NVIDIA     | `NVIDIA_API_KEY`      | build.nvidia.com; extraction + embeddings |
 | Ollama     | *(none)*              | Local, free — just run `ollama serve`     |
 
-The default config uses no local models: extraction and entities run on NVIDIA,
-dedup-confirm on OpenRouter, embeddings on NVIDIA. That is deliberate — a t3.small
-cannot host Ollama, so any local dependency blocks deployment.
+The default config still points every stage at hosted APIs: extraction, entities and
+embeddings on NVIDIA, dedup-confirm on OpenRouter. That dated from a planned t3.small
+deployment that could not host models. The deployment target is now local hardware
+(halo), and stages move to local models one at a time, each only after its own
+bake-off: embeddings via the stored-vector comparison + `pipeline reembed`,
+dedup-confirm against the cached verdicts, extraction via eval-compare.
 
 **To run fully local / free**, point stages at Ollama and pull the models:
 
@@ -275,7 +283,7 @@ docker compose up --build        # dashboard → http://localhost:8000
 ```
 
 `litestream` replicates `data/pipeline.db` to a local file replica out of the
-box; swap `docker/litestream.yml` to an S3 replica for the EC2 deployment.
+box; add the off-box sftp replica in `docker/litestream.yml` on halo.
 
 ## Planned workflows
 
@@ -286,13 +294,13 @@ documented here as the intended UX and the spec for their slices.
 
 Validate a source fully on your laptop (any provider/model), then publish the
 finished notes to the production vault with **zero recompute**: `promote` pushes
-the vault notes (git), the raw blob (→ S3, so the note stays regenerable there),
+the vault notes (git), the raw blob (so the note stays regenerable there),
 and a minimal `done` record. Intermediates don't travel — they regenerate on
 demand from `raw + generating key`.
 
 ## Config
 
-`config/pipeline.yaml` — blob store (`local` | `s3`), paths, `providers:`,
+`config/pipeline.yaml` — blob store (`local`; `s3` needs `uv sync --extra s3`), paths, `providers:`,
 per-stage `models:`, `embeddings:`, `dedup:` tuning, and worker settings.
 
 ### Long-running batches
@@ -321,6 +329,5 @@ pipeline/
   vault/               frontmatter schema + git-backed note writer
 dashboard/             read-only FastAPI state view
 docker/                Dockerfile + litestream config
-infra/                 AWS foundation (Terraform)
 config/                pipeline.yaml, feeds.yaml, prompts/
 ```

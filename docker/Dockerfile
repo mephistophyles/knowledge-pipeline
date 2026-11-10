@@ -1,8 +1,7 @@
-# Tier-1 control-box image (plan §14.1): orchestrator, workers, dashboard.
-# Heavy audio (GPU) runs in a separate burst image (build step 4), not here.
+# Pipeline image: orchestrator, workers, dashboard. Inference runs on the host.
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
-# git is needed by the vault writer; ca-certificates for S3/HTTPS.
+# git is needed by the vault writer; ca-certificates for HTTPS.
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
