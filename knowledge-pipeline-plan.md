@@ -1,5 +1,10 @@
 # Personal Knowledge Pipeline — End-to-End System Plan (v3)
 
+> **2026-11 status:** §14 (AWS) is superseded. The pipeline runs entirely on local hardware —
+> an always-on 128 GB Strix Halo box for workers + inference, a Mac for development — with
+> hosted LLM APIs as fallbacks only. The `infra/` Terraform was removed; see
+> `local-migration-playbook.md`. The rest of this plan stands.
+
 A batch-oriented ingestion → distillation → Obsidian vault system with provenance, delta tracking, per-stage evals, explicit swap points, and a database-backed control plane. Runs on AWS (EC2 + S3 + spot GPU bursts) with full local-mode parity. Designed for single-operator use, open-sourceable, and structured for handoff to Claude Code as a build spec.
 
 **v3 changes:** §14 infrastructure — two-tier compute (always-on control box + manifest-based spot GPU bursts), S3 blob store behind a storage interface, Litestream-backed SQLite, SES inbound email, nginx/TLS dashboard exposure, Terraform replication module, cost envelope.

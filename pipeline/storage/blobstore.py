@@ -56,7 +56,13 @@ class LocalBlobStore(BlobStore):
 
 class S3BlobStore(BlobStore):
     def __init__(self, bucket: str, prefix: str = "", region: str | None = None):
-        import boto3  # imported lazily so local mode needs no AWS deps at runtime
+        try:
+            import boto3  # optional extra: local mode needs no AWS deps at all
+        except ImportError as e:  # pragma: no cover - depends on install
+            raise RuntimeError(
+                "storage.blobstore is 's3' but boto3 is not installed; "
+                "run `uv sync --extra s3` or set storage.blobstore: local"
+            ) from e
 
         self.bucket = bucket
         self.prefix = prefix.strip("/")
