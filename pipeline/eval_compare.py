@@ -89,11 +89,11 @@ def approve_eval(settings: Settings, conn: sqlite3.Connection, artifact_hash: st
         raise ValueError(f"no job {artifact_hash[:12]}/{stage}")
 
     ctl.clear_control(conn, "artifact", artifact_hash)  # lift the eval hold
-    jobs.mark_done(conn, artifact_hash, stage, chosen)
+    jobs.mark_done(conn, artifact_hash, stage, settings.job_path(chosen))
     nxt = stages.next_stage(job["source_type"], stage)
     if nxt is not None:
         # approving a variant is a deliberate re-derivation: downstream re-runs on it.
-        jobs.insert_job(conn, artifact_hash, nxt, job["source_type"], input_path=chosen, reprocess=True)
+        jobs.insert_job(conn, artifact_hash, nxt, job["source_type"], input_path=settings.job_path(chosen), reprocess=True)
     return {"chosen_index": index, "chosen_intermediate": chosen, "next_stage": nxt}
 
 

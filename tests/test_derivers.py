@@ -7,6 +7,7 @@ from pathlib import Path
 from pipeline.ingestors.paste import add_paste
 from pipeline.orchestrator.executor import run_stage
 from pipeline.vault.writer import read_note
+from .conftest import cid
 
 
 def _walk(settings, conn, h, *stages):
@@ -25,7 +26,7 @@ def test_extract_claims_produces_keyed_intermediate_and_cost(settings, conn, fak
     assert payload["claims"][0]["text"] == "Taste is the differentiator."
     assert payload["gen_key"]["provider"] == "fake"
     assert payload["gen_key"]["input_hash"] == h
-    assert not (settings.vault_dir / f"corpus/claims/claim-{h[:8]}-00.md").exists()
+    assert not (settings.vault_dir / f"corpus/claims/{cid(conn, h, 0)}.md").exists()
 
     # Cost/latency ledger row recorded for the call.
     row = conn.execute(
@@ -42,7 +43,7 @@ def test_dedup_writes_claim_note_with_generating_key(settings, conn, fake_claims
     h = add_paste(settings, conn, "Quality compounds over time.", source_url="https://ex")
     _walk(settings, conn, h, "source_note", "extract_claims", "dedup")
 
-    note_path = settings.vault_dir / f"corpus/claims/claim-{h[:8]}-00.md"
+    note_path = settings.vault_dir / f"corpus/claims/{cid(conn, h, 0)}.md"
     assert note_path.exists()
     post = read_note(note_path)
     assert post["type"] == "claim"

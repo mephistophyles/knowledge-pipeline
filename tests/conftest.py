@@ -121,3 +121,13 @@ def fake_claims(monkeypatch):
 
     monkeypatch.setattr(registry, "get_provider", lambda settings, name: _Fake())
     return holder
+
+
+def cid(conn, artifact_hash: str, n: int = 0) -> str:
+    """The n-th claim an artifact committed (by insertion order). Claim IDs are minted,
+    not positional, so tests look them up instead of spelling `claim-<src8>-NN`. Returns
+    a sentinel that matches no note when the artifact has fewer than n+1 claims."""
+    rows = conn.execute(
+        "SELECT claim_id FROM claims WHERE artifact_hash=? ORDER BY rowid", (artifact_hash,)
+    ).fetchall()
+    return rows[n]["claim_id"] if len(rows) > n else f"__no_claim_{artifact_hash[:8]}_{n}"

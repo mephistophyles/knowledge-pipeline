@@ -8,7 +8,7 @@ from pipeline.ingestors.paste import add_paste
 from pipeline.orchestrator.executor import run_stage
 from pipeline.vault.writer import read_note
 
-from .conftest import FakeMsg
+from .conftest import FakeMsg, cid
 
 
 def _walk(settings, conn, h):
@@ -78,11 +78,11 @@ def test_corroborating_source_attests_not_duplicates(settings, conn, fake_claims
     _walk(settings, conn, b)
 
     # B did not create its own note; A's note gained a second attestation.
-    assert not (settings.vault_dir / f"corpus/claims/claim-{b[:8]}-00.md").exists()
-    post = read_note(settings.vault_dir / f"corpus/claims/claim-{a[:8]}-00.md")
+    assert not (settings.vault_dir / f"corpus/claims/{cid(conn, b, 0)}.md").exists()
+    post = read_note(settings.vault_dir / f"corpus/claims/{cid(conn, a, 0)}.md")
     assert len(post["attestations"]) == 2
     assert "taste B" in post.content  # the corroborating quote is appended
-    row = conn.execute("SELECT attestations FROM claims WHERE claim_id=?", (f"claim-{a[:8]}-00",)).fetchone()
+    row = conn.execute("SELECT attestations FROM claims WHERE claim_id=?", (cid(conn, a, 0),)).fetchone()
     assert row["attestations"] == 2
 
 
@@ -98,8 +98,8 @@ def test_distinct_claim_gets_new_note(settings, conn, fake_claims):
     b = add_paste(settings, conn, "B")
     _walk(settings, conn, b)
 
-    assert (settings.vault_dir / f"corpus/claims/claim-{a[:8]}-00.md").exists()
-    assert (settings.vault_dir / f"corpus/claims/claim-{b[:8]}-00.md").exists()
+    assert (settings.vault_dir / f"corpus/claims/{cid(conn, a, 0)}.md").exists()
+    assert (settings.vault_dir / f"corpus/claims/{cid(conn, b, 0)}.md").exists()
 
 
 # ── corroboration is cross-author, not repetition ─────────────────────────────
@@ -117,7 +117,7 @@ def test_same_author_repeating_is_emphasis_not_corroboration(settings, conn, fak
         body="Edition two, same point again.", claim="Taste is what sets software apart.", quote="taste 2",
     )
 
-    claim_id = f"claim-{a[:8]}-00"
+    claim_id = cid(conn, a, 0)
     post = read_note(settings.vault_dir / f"corpus/claims/{claim_id}.md")
     assert len(post["attestations"]) == 1  # the repeat is dropped, not appended
     assert "taste 2" not in post.content
@@ -140,7 +140,7 @@ def test_distinct_authors_corroborate(settings, conn, fake_claims):
         body="Second writer, independently.", claim="Taste is what sets software apart.", quote="taste B",
     )
 
-    claim_id = f"claim-{a[:8]}-00"
+    claim_id = cid(conn, a, 0)
     post = read_note(settings.vault_dir / f"corpus/claims/{claim_id}.md")
     assert len(post["attestations"]) == 2
     assert {x["author"] for x in post["attestations"]} == {"first@substack.com", "second@example.com"}
@@ -163,7 +163,7 @@ def test_author_identity_survives_display_name_and_plus_suffix(settings, conn, f
         body="Decorated header, same person.", claim="Taste is what sets software apart.", quote="taste 2",
     )
 
-    post = read_note(settings.vault_dir / f"corpus/claims/claim-{a[:8]}-00.md")
+    post = read_note(settings.vault_dir / f"corpus/claims/{cid(conn, a, 0)}.md")
     assert len(post["attestations"]) == 1
 
 

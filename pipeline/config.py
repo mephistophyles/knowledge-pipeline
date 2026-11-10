@@ -63,6 +63,35 @@ class Settings:
     def intermediate_dir(self) -> Path:
         return self._path("intermediate")
 
+    def job_path(self, path: str | None) -> str | None:
+        """How an intermediate path is STORED in `jobs`: relative to the intermediate
+        dir, so the DB survives the repo moving (MacBook → Studio → halo)."""
+        if not path:
+            return path
+        p = Path(path)
+        try:
+            return str(p.relative_to(self.intermediate_dir))
+        except ValueError:
+            return str(p)
+
+    def resolve_job_path(self, path: str | None) -> str | None:
+        """Inverse of `job_path`, tolerant of absolute paths written on another machine:
+        anything under a foreign `.../<intermediate dir name>/` is remapped here."""
+        if not path:
+            return path
+        p = Path(path)
+        if not p.is_absolute():
+            return str(self.intermediate_dir / p)
+        if p.exists():
+            return str(p)
+        marker = f"/{self.intermediate_dir.name}/"
+        s = str(p)
+        if marker in s:
+            remapped = self.intermediate_dir / s.rsplit(marker, 1)[1]
+            if remapped.exists():
+                return str(remapped)
+        return str(p)
+
     @property
     def vault_dir(self) -> Path:
         return self._path("vault")

@@ -32,9 +32,12 @@ source that repeats it.
   saved from the browser; both land in one content-addressed archive, extract via
   trafilatura, and pass a quality gate that holds teasers, index pages, and
   non-English rather than deriving them.
-- **Re-derivation is explicit** — `pipeline retract` withdraws an artifact's claims
-  before a re-run, because claim ids encode extraction position and writing a second
-  pass over a first would silently reassign them.
+- **Stable claim identity** — claim IDs (`c-000123`) are minted once and never reused.
+  `pipeline rederive <ref>` re-extracts a source and reconciles against its previous
+  claims: matches keep their IDs (old wording moves to `alternate_phrasings`), unmatched
+  claims transfer to another attesting source or retire to `corpus/claims/retracted/`.
+  Every decision is audited (`pipeline claim-history --drift`). Legacy
+  `claim-<src8>-NN` IDs keep working. `pipeline retract` still withdraws a source entirely.
 - **Eval-compare** — run a stage under several `{provider, model, params}`
   variants over one source and compare outputs + cost + latency before approving
   one into the vault (see [Common operations](#common-operations)).

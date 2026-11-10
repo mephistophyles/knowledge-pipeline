@@ -1049,12 +1049,13 @@ def retract_cmd(
     ),
     yes: bool = typer.Option(False, "--yes", help="Skip the confirmation prompt."),
 ) -> None:
-    """Withdraw an artifact's claims from the corpus so it can be re-derived cleanly.
+    """Withdraw an artifact's claims from the corpus entirely ("this source is gone").
 
-    Claim ids encode extraction position, so a second pass committed on top of a first
-    reassigns them. Retract is the inverse of what `dedup` commits: it drops this
-    artifact's claims, detaches the attestations it left on other notes, and unpicks any
-    merges it took part in. Nothing is lost — the vault is a git repo.
+    To re-run a source under a new model or prompt, use `pipeline rederive` instead: it
+    keeps claim IDs by matching, where retract deletes them. Retract is the inverse of
+    what `dedup` commits: it drops this artifact's claims, detaches the attestations it
+    left on other notes, and unpicks any merges it took part in. Nothing is lost — the
+    vault is a git repo.
     """
     from pipeline import retract as retract_mod
 
@@ -1272,3 +1273,56 @@ def _status_artifact(conn, artifact_hash: str) -> None:
 
 if __name__ == "__main__":
     app()
+
+
+@app.command("rederive")
+def rederive_cmd(
+    ref: str = typer.Argument(..., help="Artifact to re-extract under the current config."),
+) -> None:
+    """Re-run extraction for an artifact, keeping claim IDs.
+
+    Requeues extract_claims; when dedup commits, it reconciles the new claims against
+    this artifact's previous ones: matches keep their IDs, unmatched ones transfer to
+    another attesting source or are retired to corpus/claims/retracted/. Every decision
+    is recorded — see `pipeline claim-history`.
+    """
+    settings = _settings()
+    conn = _conn(settings)
+    h = _resolve(conn, ref)
+    n = conn.execute(
+        "UPDATE jobs SET status='ready', attempts=0, error=NULL, updated_at=datetime('now') "
+        "WHERE artifact_hash=? AND stage='extract_claims'",
+        (h,),
+    ).rowcount
+    conn.commit()
+    typer.secho(f"requeued extract_claims for {h[:12]}" if n else
+                f"{h[:12]} has no extract_claims job yet — run the chain first",
+                fg="green" if n else "yellow")
+
+
+@app.command("claim-history")
+def claim_history_cmd(
+    claim: str = typer.Option(None, "--claim", help="Only this claim ID."),
+    event: str = typer.Option(
+        None, "--event", help="minted | kept | transferred | retired | detached"
+    ),
+    drift: bool = typer.Option(
+        False, "--drift", help="Only `kept` decisions whose wording changed (the ones to audit)."
+    ),
+    limit: int = typer.Option(50, "--limit"),
+) -> None:
+    """Audit trail of claim-identity decisions, newest first."""
+    from pipeline import claim_identity
+
+    settings = _settings()
+    conn = _conn(settings)
+    rows = claim_identity.history(conn, claim_id=claim, event="kept" if drift else event,
+                                  limit=limit)
+    for r in rows:
+        if drift and (r["old_text"] or "") == (r["new_text"] or ""):
+            continue
+        dist = f" d={r['distance']:.3f}" if r["distance"] is not None else ""
+        typer.echo(f"{r['at']}  {r['event']:<11} {r['claim_id']}{dist}  "
+                   f"{(r['artifact_hash'] or '')[:12]}  {r['detail'] or ''}")
+        if r["old_text"] and r["new_text"] and r["old_text"] != r["new_text"]:
+            typer.echo(f"    was: {r['old_text']}\n    now: {r['new_text']}")

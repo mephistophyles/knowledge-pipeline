@@ -6,7 +6,7 @@ from pipeline.ingestors.web import add_web
 from pipeline.orchestrator.executor import run_stage
 from pipeline.vault.writer import read_note
 
-from .conftest import FakeMsg
+from .conftest import FakeMsg, cid
 
 
 def _walk(settings, conn, h):
@@ -77,7 +77,7 @@ def test_one_writer_on_two_channels_does_not_corroborate_themselves(settings, co
     b = add_web(settings, conn, "the same essay on the site", url="https://stratechery.com/aggregation")
     _walk(settings, conn, b)
 
-    claim_id = f"claim-{a[:8]}-00"
+    claim_id = cid(conn, a, 0)
     post = read_note(settings.vault_dir / f"corpus/claims/{claim_id}.md")
     assert len(post.metadata["attestations"]) == 1
     row = conn.execute("SELECT attestations FROM claims WHERE claim_id=?", (claim_id,)).fetchone()
@@ -100,7 +100,7 @@ def test_two_writers_at_one_venue_do_corroborate(settings, conn, fake_claims):
     _walk(settings, conn, b)
 
     row = conn.execute(
-        "SELECT attestations FROM claims WHERE claim_id=?", (f"claim-{a[:8]}-00",)
+        "SELECT attestations FROM claims WHERE claim_id=?", (cid(conn, a, 0),)
     ).fetchone()
     assert row["attestations"] == 2
 
@@ -122,7 +122,7 @@ def test_unmapped_channel_attests_but_cannot_corroborate(settings, conn, fake_cl
     b = ingest_message(settings, conn, FakeMsg(text="ed2", from_="stranger@example.com", subject="B"))
     _walk(settings, conn, b)
 
-    claim_id = f"claim-{a[:8]}-00"
+    claim_id = cid(conn, a, 0)
     post = read_note(settings.vault_dir / f"corpus/claims/{claim_id}.md")
     atts = post.metadata["attestations"]
     assert len(atts) == 2                    # recorded and visible
@@ -139,7 +139,7 @@ def test_known_channel_records_the_identity_on_the_attestation(settings, conn, f
     h = ingest_message(settings, conn, FakeMsg(text="ed", from_="known@example.com", subject="A"))
     _walk(settings, conn, h)
 
-    post = read_note(settings.vault_dir / f"corpus/claims/claim-{h[:8]}-00.md")
+    post = read_note(settings.vault_dir / f"corpus/claims/{cid(conn, h, 0)}.md")
     att = post.metadata["attestations"][0]
     assert att["identity"] == ident
     assert att["author"] == "known@example.com"  # the channel is still recorded
@@ -163,5 +163,5 @@ def test_legacy_attestations_resolve_through_the_table(settings, conn, fake_clai
     b = add_web(settings, conn, "same essay", url="https://stratechery.com/post")
     _walk(settings, conn, b)
 
-    post = read_note(settings.vault_dir / f"corpus/claims/claim-{a[:8]}-00.md")
+    post = read_note(settings.vault_dir / f"corpus/claims/{cid(conn, a, 0)}.md")
     assert len(post.metadata["attestations"]) == 1  # recognised as the same writer

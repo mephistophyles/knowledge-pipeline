@@ -217,3 +217,27 @@ CREATE INDEX IF NOT EXISTS idx_batches_state ON batches(state);
 
 -- Workflow grouping for batches is applied by the additive migration in connection.py
 -- (ALTER has no IF NOT EXISTS, and this file is executed on every bootstrap).
+
+-- Stable claim identity (pipeline/claim_identity.py). IDs are minted from a counter
+-- that only moves forward, so a retired ID can never come back as a different idea.
+CREATE TABLE IF NOT EXISTS id_counters (
+  name TEXT PRIMARY KEY,
+  next INTEGER NOT NULL
+);
+
+-- Every identity decision, so a re-derivation is auditable: minted | kept |
+-- transferred | retired | detached. `kept` rows with old_text != new_text are the ones
+-- to sample: a false "same" verdict keeps an ID on a claim whose meaning drifted.
+CREATE TABLE IF NOT EXISTS claim_history (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  claim_id      TEXT NOT NULL,
+  artifact_hash TEXT,
+  event         TEXT NOT NULL,
+  old_text      TEXT,
+  new_text      TEXT,
+  distance      REAL,
+  detail        TEXT,
+  at            TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_claim_history_claim ON claim_history(claim_id);
+CREATE INDEX IF NOT EXISTS idx_claim_history_event ON claim_history(event);
