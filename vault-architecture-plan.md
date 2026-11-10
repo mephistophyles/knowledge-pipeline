@@ -54,7 +54,7 @@ vault/
     commentary/                      sibling notes on sources/claims (exists)
     experiences/                     (exists)
   work/                     personal ── NEW: work layer ──
-    goals/  projects/  decisions/  tasks/  reviews/  ideas/
+    areas/  goals/  projects/  decisions/  tasks/  reviews/  ideas/
   _system/                  system
     ontology.md                      generated type/property/relation reference
     bases/*.base                     generated Obsidian Bases views
@@ -82,8 +82,9 @@ vault/
 | `entity` | derived | name, entity_type, mentions, **`aliases`** | gains backlinks from claims once claim↔entity linking exists |
 | `topic` | derived | **member claims, label, generating key** | NEW. Built from embedding clusters plus an LLM label; replaces the planned "hubs" |
 | `commentary` | personal | annotates | exists |
-| `goal` | personal | status (active / paused / done / abandoned), target_date, why | |
-| `project` | personal | status (planning / active / on-hold / done / archived), **`goal: [[…]]`**, repo, start, `graduated_from: [[idea]]` | |
+| `area` | personal | status (active / dormant), **`sensitivity`**, description | ongoing responsibility with no end date (businesses, writing, W2…). The top of the work tree (§4.0) |
+| `goal` | personal | status (active / paused / done / abandoned), **`area`**, target_date, why | |
+| `project` | personal | status (planning / active / on-hold / done / archived), **`area: [[…]]`**, **`goal: [[…]]`**, **`repos: []`** (zero or more), start, `graduated_from: [[idea]]` | not 1:1 with `~/Dev`: a project may have no repo, or several |
 | `decision` | personal | status (proposed / accepted / superseded), `project`, **`informed_by: [[claim]]`**, supersedes | ADR sections: context / options / decision / consequences |
 | `task` | personal | status (todo / doing / waiting / done / cancelled), `project`, due, priority | substantial tasks only; small ones stay checkboxes inside the project note |
 | `review` | personal | period_start / period_end | ends with "questions this period answers", each citing a note |
@@ -131,6 +132,25 @@ new extraction model, which the model bake-off will probably trigger.
 
 ## 4. Work layer: linking knowledge to active work
 
+### 4.0 Organization: areas, not repos (decided 2026-11-10)
+
+Work is organized by **area** (ongoing, never "done") → **goal / project** (has an
+outcome, can finish), not by `~/Dev`. Repos attach to projects as an optional signal.
+Not every project is software, and not every repo is active. Initial scope:
+
+| Area | Projects / goals (initial) | Repos |
+|---|---|---|
+| Business portfolio | starting the businesses (one project per venture as they firm up) | — |
+| Online writing | writing (publication cadence as a goal) | — |
+| Software | knowledge-pipeline, stached, containqr, settled | the four repos |
+| Self-hosted apps (Tailscale) | the platform, plus month-close, text-yourself, … as child projects | month-close, text-yourself, … |
+| Consulting | the practice; the plumb site as a project | plumb |
+| Education | BSc (project); MIT MBA (goal, with an application project under it) | — |
+| W2 | current role (area note; projects as needed) | — |
+
+`sensitivity` on areas (`private` / `restricted`, inherited by everything linked to the
+area) exists because W2 and education content should not reach every agent. See §5.1 scopes.
+
 The point of adding project management *here*, rather than in a separate tool, is the
 bridge. Your projects can pull from the corpus, and your decisions can cite evidence.
 
@@ -150,7 +170,7 @@ computes:
   searched against the claim index. The result is the top claims, with corroboration and
   any `contested` flag. This is where 1.5k+ claims start working for you.
 
-### 4.3 Where it lives: decision needed
+### 4.3 Where it lives (decided: Option A)
 
 - **Option A, marked block:** a block delimited by
   `<!-- pipeline:derived:start -->`/`end` at the bottom of your note. The pipeline only
@@ -159,7 +179,7 @@ computes:
 - **Option B, sibling note:** a generated `work/projects/<name>.status.md` next to yours.
   Never touches your file; doubles the file count in `work/`.
 
-Option A is recommended, with a test that the pipeline's writes to `work/` touch only
+**Decided 2026-11-10: Option A**, with a test that the pipeline's writes to `work/` touch only
 that block.
 
 ### 4.4 Review cadence
@@ -192,6 +212,11 @@ Two read paths. Both are on halo and neither can write.
    - `sources_for(claim)` with the exact quotes.
    - No write tools at all; obsidian-second-brain's server mixes the two, which is the
      thing to avoid.
+
+**Scopes.** A read-only server can still over-share. Each agent gets a scope: `corpus`
+(knowledge only), `work` (adds `work/`, excluding `restricted`), or `all`. Notes inherit
+`sensitivity` from their area. The read-only clone for broad agents is built **without**
+restricted notes, rather than relying on agents to skip them.
 
 ### 5.2 Front door and loading budgets
 
@@ -235,6 +260,26 @@ Loading tiers (claude-obsidian's depth budgets):
 
 ---
 
+## 5.5 Inbox: the only write path into the knowledge base (decided 2026-11-10)
+
+Agents never write the vault. They, and you, can **submit** to a gated inbox:
+
+1. **Submit:** content (URL, text, file) plus a **directives** block, kept separate from
+   the content. Directives are a closed vocabulary where possible: attribution mode,
+   `personal` vs `corpus`, author identity, sections to extract or skip. They can also
+   include free-text processing instructions.
+2. **Land:** the item goes into the raw store as any artifact does (invariant 1), in a
+   `quarantined` state. The manifest records the submitter and the directives verbatim.
+3. **Gate:** a dashboard approval queue (same pattern as the authors queue). Nothing
+   enters the derivation chain until you approve it. Policy can auto-approve trusted
+   submitter × source-type pairs later.
+4. **Derive:** approved directives reach the extraction prompt in a delimited, trusted
+   slot. **Instructions found inside the content body are never honored**; content is
+   data. A directive's authority comes from who submitted it and the gate, never from the text.
+
+Directives are part of the generating key (hashed), so a note derived under different
+instructions is a different keyed output and stays reproducible.
+
 ## 6. Processing changes borrowed from the reviewed repos
 
 | Change | From | Why |
@@ -277,7 +322,8 @@ Each step is independently shippable. The model bake-off runs in parallel and do
 1. **Claim identity** (§3.3): fix positional IDs before the first corpus-wide re-extraction.
    - Option one: content-hash IDs plus a redirect on rewording.
    - Option two: keep positional IDs and require retract-then-rederive, as today.
-2. **Derived block placement** (§4.3): marked block inside your note (recommended), or a sibling note.
-3. **Scope of `work/`:** everything (personal plus all `~/Dev` projects), or start with this project and one other.
-4. **Agent write-back:** stay strictly read-only (recommended for now), or allow agents an
-   `inbox/` for proposals you accept by hand.
+2. ~~Derived block placement~~: decided, marked block (§4.3).
+3. ~~Scope of `work/`~~: decided, areas-first with the initial scope in §4.0.
+4. ~~Agent write-back~~: decided, strictly read-only; gated inbox for ingestion (§5.5).
+5. **Area for stached / containqr / settled:** placed under "Software" for now. Move any
+   that belong to the business portfolio.
