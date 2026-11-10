@@ -109,7 +109,7 @@ def fake_claims(monkeypatch):
                 text = holder["text"]
             return Completion(text=text, provider="fake", model=model, tokens_in=11, tokens_out=7, usd=0.0001, latency_ms=42)
 
-        def embed(self, texts, model):
+        def embed(self, texts, model, *, input_type=None):
             vectors = []
             for t in texts:
                 if holder["vector"] is not None:

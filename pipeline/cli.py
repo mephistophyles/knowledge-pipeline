@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import Optional
+from datetime import timedelta
+from pathlib import Path
+from typing import List, Optional
 
 import typer
 from dotenv import load_dotenv
@@ -472,6 +474,571 @@ def release(ref: str = typer.Argument(..., help="Release a held artifact.")) -> 
     h = _resolve(conn, ref)
     n = jobs.release_artifact(conn, h)
     typer.secho(f"released {h[:12]} ({n} stage row(s))", fg="green")
+
+
+@app.command("reembed")
+def reembed_cmd(
+    apply_: bool = typer.Option(False, "--apply", help="Rebuild the indexes."),
+) -> None:
+    """Rebuild the vector indexes with the configured embedder.
+
+    Required after changing `embeddings.model`: a vec0 table is fixed-width, so a new
+    dimensionality cannot be written into the old index — and mixing embedders would not
+    error, it would silently make L2 distances incomparable. Vectors are derived data;
+    `claims.text` is stored, so this is always reversible.
+    """
+    from pipeline import reembed
+
+    settings = _settings()
+    conn = _conn(settings)
+
+    def show(kind, done, total):
+        if done % 320 == 0 or done == total:
+            typer.echo(f"  {kind}: {done}/{total}")
+
+    info = reembed.rebuild(settings, conn, dry_run=not apply_, progress=show)
+    typer.echo(f"embedder: {info['model']} (input_type={info['input_type']}) → {info['dims']} dims")
+    typer.echo(f"claims: {info['claims']}   entities: {info['entities']}")
+    if not apply_:
+        typer.secho("dry run — re-run with --apply to rebuild", fg="cyan")
+        return
+    typer.secho(
+        f"rebuilt: {info['indexed_claims']} claim vectors, "
+        f"{info['indexed_entities']} entity vectors", fg="green",
+    )
+    typer.secho("thresholds are embedder-specific — confirm dedup.max_distance suits this "
+                "model before the next run", fg="yellow")
+
+
+@app.command("stop")
+def stop_batches(
+    clear: bool = typer.Option(False, "--clear", help="Cancel the stop request instead."),
+) -> None:
+    """Ask any running batch to finish its current item and exit.
+
+    For closing the laptop. Long runs check this between items and wind up cleanly, so
+    progress already committed is kept and the work resumes from cache.
+    """
+    from pipeline import batch_guard
+
+    settings = _settings()
+    if clear:
+        batch_guard.clear_stop(settings.root)
+        typer.secho("stop request cleared", fg="green")
+        return
+    p = batch_guard.request_stop(settings.root)
+    typer.secho(f"stop requested ({p}) — running batches will wind up shortly", fg="yellow")
+
+
+@app.command("recount")
+def recount(
+    apply_: bool = typer.Option(False, "--apply", help="Write the corrected counts."),
+) -> None:
+    """Recompute corroboration as the number of DISTINCT VOICES per claim.
+
+    Grooming counted attestation ENTRIES, so one writer restating a point across editions
+    read as several independent sources. Attestation entries are left alone — they are
+    provenance and the merges were correct — only the number is corrected.
+    """
+    from pipeline import corpus_dedup
+
+    settings = _settings()
+    conn = _conn(settings)
+    changed = corpus_dedup.recount_attestations(settings, conn, dry_run=not apply_)
+
+    if not changed:
+        typer.secho("every claim's corroboration already counts distinct voices", fg="green")
+        return
+    inflated = sum(1 for _, b, a in changed if a < b)
+    typer.secho(f"{len(changed)} claim(s) change; {inflated} were inflated", fg="yellow", bold=True)
+    for claim_id, before, after in sorted(changed, key=lambda c: c[1] - c[2], reverse=True)[:25]:
+        typer.echo(f"  {claim_id:<28} {before} → {after}")
+    if not apply_:
+        typer.secho("\ndry run — re-run with --apply to write these", fg="cyan")
+
+
+feed_app = typer.Typer(help="Ongoing weekly email batches (Saturday→Friday).")
+app.add_typer(feed_app, name="feed")
+
+
+@feed_app.command("weeks")
+def feed_weeks(
+    since: str = typer.Option("2026-08-01", "--since", help="First Saturday to track."),
+) -> None:
+    """List Saturday→Friday windows since the cutoff, with what each has pulled."""
+    from datetime import date
+
+    from pipeline import feed
+
+    settings = _settings()
+    conn = _conn(settings)
+    today = date.today()
+    weeks = feed.weeks_since(date.fromisoformat(since), today)
+    typer.secho(f"{'week':<28}{'archived':>9}{'process':>9}{'ingested':>9}  state", bold=True)
+    for s in feed.week_status(conn, weeks):
+        w = s["week"]
+        state = "complete" if w.is_complete(today) else "in progress"
+        typer.echo(
+            f"{w.label:<28}{s['archived']:>9}{s['process']:>9}{s['ingested']:>9}  {state}"
+        )
+
+
+@feed_app.command("pull")
+def feed_pull(
+    label: str = typer.Option("Insight", "--label", help="Gmail label to pull."),
+    week: Optional[str] = typer.Option(None, "--week", help="Saturday of the week (YYYY-MM-DD)."),
+    catch_up: bool = typer.Option(False, "--catch-up", help="Pull every complete week since --since."),
+    since: str = typer.Option("2026-08-01", "--since", help="First Saturday to track."),
+    include_current: bool = typer.Option(
+        False, "--include-current", help="Also pull the week in progress (partial batch)."
+    ),
+) -> None:
+    """Archive a week's messages into the ledger, tagged `week:<saturday>`.
+
+    The window IS the cursor: pulling a given week is the same operation whenever you run
+    it, and re-running costs only the re-read because archiving is keyed on content hash.
+    """
+    from datetime import date
+
+    from pipeline import feed
+
+    settings = _settings()
+    conn = _conn(settings)
+    today = date.today()
+
+    if week:
+        targets = [feed.Week(feed.week_start(date.fromisoformat(week)),
+                             feed.week_start(date.fromisoformat(week)) + timedelta(days=6))]
+    elif catch_up:
+        targets = [w for w in feed.weeks_since(date.fromisoformat(since), today)
+                   if w.is_complete(today) or include_current]
+    else:
+        typer.secho("give --week YYYY-MM-DD or --catch-up", fg="red")
+        raise typer.Exit(1)
+    if not targets:
+        typer.echo("no complete weeks yet — use --include-current to pull the week in progress")
+        return
+
+    for w in targets:
+        typer.secho(f"\npulling {w.label} from {label!r} …", bold=True)
+        try:
+            counts = feed.pull_week(settings, conn, label=label, week=w)
+        except RuntimeError as e:
+            typer.secho(f"  {e}", fg="red")
+            raise typer.Exit(1)
+        typer.echo(f"  {counts}")
+    typer.secho("\nnow: pipeline backlog batches --assign && pipeline backlog run", fg="cyan")
+
+
+web_app = typer.Typer(help="Web backlog: fetch once into an archive, then page the ledger.")
+app.add_typer(web_app, name="web")
+
+
+@web_app.command("add")
+def web_add(url: str = typer.Argument(..., help="Article URL.")) -> None:
+    """Fetch and archive one URL."""
+    from pipeline.web import ledger
+
+    settings = _settings()
+    conn = _conn(settings)
+    r = ledger.add_url(settings, conn, url)
+    if r["state"] == "escalated":
+        typer.secho(f"escalated ({r['cause']}): {r['url']}", fg="yellow")
+        typer.echo(f"  {r['detail']}\n  paste the body by hand: pipeline add web --url {r['url']}")
+        return
+    who = r.get("identity_id") or "UNMAPPED (attestations will be provisional)"
+    typer.secho(f"{r['state']}: {r['url']}", fg="green")
+    typer.echo(f"  title:  {r.get('title') or '—'}\n  author: {who}")
+    if r.get("syndicated_from"):
+        typer.secho(f"  syndicated — page declares a canonical on another site", fg="yellow")
+
+
+@web_app.command("scan")
+def web_scan(
+    urls: Optional[List[str]] = typer.Argument(None, help="URLs to fetch (space-separated)."),
+    file: Optional[str] = typer.Option(
+        None, "--file", "-f", help="File of URLs: one per line, or a CSV export (# comments ok)."
+    ),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Stop after N URLs."),
+) -> None:
+    """Fetch a reading list into the ledger. Escalations are recorded, never fatal.
+
+    Takes URLs directly, a file, or both — a scratch list and an export are the same job.
+    """
+    from pipeline.web import ledger
+
+    settings = _settings()
+    conn = _conn(settings)
+    collected = list(urls or [])
+    if file:
+        collected += ledger.read_url_list(file)
+    if not collected:
+        typer.secho("give URLs, or --file with a list/CSV of them", fg="red")
+        raise typer.Exit(1)
+
+    seen, deduped = set(), []
+    for u in collected:
+        try:
+            key = ledger.canonicalize(u)
+        except Exception:
+            continue
+        if key not in seen:
+            seen.add(key)
+            deduped.append(u)
+    dropped = len(collected) - len(deduped)
+    urls = deduped[: limit or None]
+    if dropped:
+        typer.secho(f"({dropped} duplicate URL(s) collapsed)", fg="cyan")
+    if not urls:
+        typer.echo("no usable URLs")
+        return
+    typer.echo(f"fetching {len(urls)} URL(s) — 1 req/s per host, honouring robots.txt\n")
+
+    def show(r):
+        mark = {"archived": "+", "duplicate": "=", "escalated": "!"}.get(r["state"], "?")
+        extra = f" ({r['cause']})" if r["state"] == "escalated" else ""
+        typer.echo(f"  {mark} {r['url'][:90]}{extra}")
+
+    counts = ledger.scan(settings, conn, urls, progress=show)
+    typer.secho(f"\n{counts}", bold=True)
+
+
+@web_app.command("audit")
+def web_audit(
+    urls: Optional[List[str]] = typer.Argument(None, help="Sites or article URLs to audit."),
+    file: Optional[str] = typer.Option(None, "--file", "-f", help="File of sites/URLs."),
+) -> None:
+    """What a site publishes about how it wants to be read — check before a backlog run.
+
+    Reports robots.txt as it applies to us, any Crawl-delay, the sitemaps and feeds the
+    site PUBLISHES (its own index is sanctioned enumeration, and better citizenship than
+    crawling a link graph), and its terms page with any automated-access language.
+
+    It renders findings, not verdicts: whether a site's terms permit a personal reading
+    archive is your judgment, and a keyword scan of legal text is evidence, not advice.
+    """
+    from pipeline.web import audit as au
+    from pipeline.web import ledger
+
+    targets = list(urls or [])
+    if file:
+        targets += ledger.read_url_list(file)
+    if not targets:
+        typer.secho("give sites/URLs, or --file", fg="red")
+        raise typer.Exit(1)
+
+    for a in au.audit_many(targets):
+        typer.secho(f"\n── {a.host} " + "─" * max(0, 58 - len(a.host)), bold=True)
+        verdict = {True: "ALLOWED", False: "DISALLOWED", None: "unknown"}[a.allowed]
+        colour = {"ALLOWED": "green", "DISALLOWED": "red", "unknown": "yellow"}[verdict]
+        typer.secho(f"  robots.txt      HTTP {a.robots_status}  → {verdict} for our UA", fg=colour)
+        if a.crawl_delay and a.crawl_delay > 1:
+            typer.secho(f"  crawl-delay     {a.crawl_delay:g}s requested (honoured)", fg="cyan")
+        typer.echo(f"  sitemaps        {', '.join(a.sitemaps) if a.sitemaps else '—'}")
+        if a.sitemap_urls is not None:
+            typer.echo(f"  sitemap size    ~{a.sitemap_urls} URLs")
+        typer.echo(f"  feeds           {', '.join(a.feeds) if a.feeds else '—'}")
+        typer.echo(f"  terms           {a.terms_url or '—'}")
+        if a.terms_flags:
+            typer.secho(f"  terms mentions  {', '.join(a.terms_flags)}", fg="yellow")
+            typer.echo("                  ^ read the terms before a backlog run")
+            for sn in a.terms_snippets[:3]:
+                typer.echo(f"                  … {sn[:220]}")
+        for n in a.notes:
+            typer.echo(f"  note            {n}")
+
+
+@web_app.command("import")
+def web_import(
+    path: str = typer.Argument(..., help="Saved .html/.mhtml file, or a directory of them."),
+    url: Optional[str] = typer.Option(None, "--url", help="Source URL (wins over what the file records)."),
+    title: Optional[str] = typer.Option(None, "--title", help="Override the page title."),
+) -> None:
+    """Import a locally saved page — no server request, so robots.txt does not apply.
+
+    For pages our fetcher may not request. Saving from the browser involves no additional
+    request at all, which is why this exists rather than a robots override.
+    """
+    from pipeline.web import snapshot
+
+    settings = _settings()
+    conn = _conn(settings)
+    p = Path(path)
+    if p.is_dir():
+        def show(r):
+            mark = {"archived": "+", "duplicate": "=", "failed": "!"}.get(r["state"], "?")
+            typer.echo(f"  {mark} {r['url'][:88]}" + (f"  {r.get('error','')}" if r["state"] == "failed" else ""))
+
+        counts = snapshot.import_dir(settings, conn, p, progress=show)
+        typer.secho(f"\n{counts}", bold=True)
+        return
+    try:
+        r = snapshot.import_file(settings, conn, p, url=url, title=title)
+    except snapshot.SnapshotError as e:
+        typer.secho(f"cannot import: {e}", fg="red")
+        raise typer.Exit(1)
+    who = r.get("identity_id") or "UNMAPPED (attestations will be provisional)"
+    typer.secho(f"{r['state']}: {r['url']}", fg="green")
+    typer.echo(f"  title:  {r.get('title') or '—'}\n  author: {who}\n  url from: {r['resolved_url_from']}")
+
+
+@web_app.command("derive")
+def web_derive(
+    limit: int = typer.Option(50, "--limit", help="Max pages to extract this run."),
+    site: Optional[str] = typer.Option(None, "--site", help="Restrict to one hostname."),
+) -> None:
+    """Extract archived pages into artifacts, queueing them for the corpus chain.
+
+    Reads the archive, so it makes no difference whether a page was fetched or saved from
+    the browser. Anything the quality gate distrusts is HELD with its reason rather than
+    processed, since a bad extraction costs an LLM call and lands in the vault.
+    """
+    from pipeline.web import derive as d
+
+    settings = _settings()
+    conn = _conn(settings)
+    VaultWriter(settings.vault_dir).ensure_layout()
+
+    def show(r):
+        if r["state"] == "held":
+            typer.secho(f"  ~ HELD ({r['reason']}, {r['word_count']}w) {r['url'][:70]}", fg="yellow")
+        else:
+            who = r["identity_id"] or "UNMAPPED"
+            typer.echo(f"  + {r['artifact_hash'][:12]}  {r['word_count']:>6}w  {who:<26} {r['url'][:56]}")
+
+    counts = d.derive(settings, conn, limit=limit, site=site, progress=show)
+    if not counts:
+        typer.echo("nothing archived and awaiting extraction")
+        return
+    typer.secho(f"\n{counts}", bold=True)
+
+
+@web_app.command("held")
+def web_held() -> None:
+    """Pages the quality gate would not trust, and why."""
+    settings = _settings()
+    conn = _conn(settings)
+    rows = conn.execute(
+        "SELECT url, escalation, title FROM web_backlog WHERE state='held' ORDER BY updated_at DESC"
+    ).fetchall()
+    if not rows:
+        typer.secho("nothing held", fg="green")
+        return
+    typer.secho(f"{len(rows)} page(s) held:", fg="yellow", bold=True)
+    for r in rows:
+        typer.echo(f"  {r['escalation']:<28} {r['url'][:76]}")
+    typer.echo("\n  paste a good body by hand:  pipeline add web --url <url> -f body.md")
+
+
+@web_app.command("status")
+def web_status() -> None:
+    """Ledger totals, plus the escalation rate the fetch decision depends on."""
+    from pipeline.web import ledger
+
+    settings = _settings()
+    conn = _conn(settings)
+    s = ledger.summary(conn)
+    if not s or not any(v for k, v in s.items() if k != "unmapped_authors"):
+        typer.echo("web ledger is empty — `pipeline web add <url>` or `pipeline web scan <file>`")
+        return
+    typer.secho(f"{s}", bold=True)
+    rates = ledger.escalation_rates(conn)
+    if rates:
+        typer.secho("\nescalations by month (evidence for browser-vs-form):", bold=True)
+        for r in rates:
+            typer.echo(f"  {r['month']}  {r['cause']:<28} {r['n']}")
+
+
+identity_app = typer.Typer(help="Author identity: map channels to the people who write them.")
+app.add_typer(identity_app, name="identity")
+
+
+@identity_app.command("harvest")
+def identity_harvest(
+    apply_: bool = typer.Option(False, "--apply", help="Write proposals to the table (unconfirmed)."),
+) -> None:
+    """Propose identities from the archived .eml display names. Dry run unless --apply."""
+    from pipeline import identity_seed
+
+    settings = _settings()
+    conn = _conn(settings)
+    props = identity_seed.harvest(settings, conn)
+    people = [p for p in props if p.person]
+    unknown = [p for p in props if not p.person]
+
+    # Grouped by identity, not by alias: one writer with three publications is ONE author,
+    # and a flat per-alias listing reads as duplication when it is the opposite.
+    from collections import defaultdict
+
+    grouped: dict[str, list] = defaultdict(list)
+    for p in people:
+        grouped[p.identity_id].append(p)
+    typer.secho(
+        f"\n{len(people)} channel(s) → {len(grouped)} person identit(ies):", bold=True, fg="green"
+    )
+    for ident, ps in sorted(grouped.items(), key=lambda kv: -sum(p.editions for p in kv[1])):
+        typer.echo(f"  {ps[0].person:<28} {ident}")
+        for p in sorted(ps, key=lambda x: -x.editions):
+            typer.echo(f"       {p.alias:<46} ({p.editions:>4}) {p.reason}")
+    typer.secho(f"\n{len(unknown)} need(s) a human — the writer is not in the header:", bold=True, fg="yellow")
+    for p in sorted(unknown, key=lambda x: -x.editions):
+        typer.echo(f"  {(p.display or '—'):<28} {p.alias:<44} ({p.editions:>4}) {p.reason}")
+
+    if apply_:
+        n = identity_seed.apply(conn, props)
+        typer.secho(f"\nwrote {n} proposed alias(es); confirm with `pipeline identity confirm`", fg="green")
+    else:
+        typer.secho("\ndry run — re-run with --apply to write these as proposals", fg="cyan")
+
+
+@identity_app.command("sync")
+def identity_sync(
+    path: Optional[str] = typer.Option(None, "--file", help="Curation file (default config/identities.yaml)."),
+) -> None:
+    """Apply config/identities.yaml — the canonical record — as curated mappings."""
+    from pipeline import identity_seed
+
+    settings = _settings()
+    conn = _conn(settings)
+    n_id, n_alias, conflicts = identity_seed.sync(settings, conn, path)
+    typer.secho(f"synced {n_id} identities, {n_alias} aliases (curated)", fg="green")
+    for c in conflicts:
+        typer.secho(f"  CONFLICT (skipped): {c}", fg="red")
+
+
+@identity_app.command("unmapped")
+def identity_unmapped() -> None:
+    """Channel keys in the backlog with no curated identity — what still needs a decision."""
+    settings = _settings()
+    conn = _conn(settings)
+    rows = conn.execute(
+        "SELECT b.author, COUNT(*) n FROM backlog b WHERE b.author IS NOT NULL AND b.author NOT IN "
+        "(SELECT alias FROM identity_aliases WHERE confidence='curated') GROUP BY b.author ORDER BY n DESC"
+    ).fetchall()
+    # Web hosts are listed together with email channels: they are the same kind of
+    # decision, and a Substack newsletter publishes on a custom subdomain that never
+    # matches its sending address, so mapping one does not map the other.
+    hosts = conn.execute(
+        "SELECT site, COUNT(*) n FROM web_backlog WHERE identity_id IS NULL AND site IS NOT NULL "
+        "AND state<>'escalated' GROUP BY site ORDER BY n DESC"
+    ).fetchall()
+    if not rows and not hosts:
+        typer.secho("every channel and web host resolves to a curated identity", fg="green")
+        return
+    if rows:
+        typer.secho(f"{len(rows)} unmapped email channel(s):", fg="yellow", bold=True)
+        for r in rows:
+            typer.echo(f"  {r['author']:<48} ({r['n']})")
+    if hosts:
+        typer.secho(f"\n{len(hosts)} unmapped web host(s):", fg="yellow", bold=True)
+        for r in hosts:
+            typer.echo(f"  {r['site']:<48} ({r['n']})")
+        typer.echo("\n  link one to an author you already have:")
+        typer.echo("    pipeline identity set <host> '<Name>' --id person:<slug>")
+
+
+@identity_app.command("apply")
+def identity_apply(
+    apply_: bool = typer.Option(False, "--apply", help="Write the upgrades."),
+) -> None:
+    """Upgrade provisional attestations whose channel now has an author, then recount.
+
+    The other half of mapping an author: deciding who wrote something fixes future
+    comparisons, but notes already written keep `provisional: true` and are still not
+    counted as support until this runs.
+    """
+    from pipeline import corpus_dedup
+
+    settings = _settings()
+    conn = _conn(settings)
+    upgraded = corpus_dedup.resolve_provisional(settings, conn, dry_run=not apply_)
+    if not upgraded:
+        typer.secho("no provisional attestations are resolvable yet", fg="green")
+        return
+    by_ident: dict[str, int] = {}
+    for _claim, ident in upgraded:
+        by_ident[ident] = by_ident.get(ident, 0) + 1
+    typer.secho(f"{len(upgraded)} attestation(s) upgradeable:", fg="yellow", bold=True)
+    for ident, n in sorted(by_ident.items(), key=lambda kv: -kv[1]):
+        typer.echo(f"  {ident:<40} {n}")
+    if not apply_:
+        typer.secho("\ndry run — re-run with --apply", fg="cyan")
+        return
+    changed = corpus_dedup.recount_attestations(settings, conn)
+    typer.secho(f"applied; {len(changed)} claim(s) changed corroboration count", fg="green")
+
+
+@identity_app.command("list")
+def identity_list(
+    proposed: bool = typer.Option(False, "--proposed", help="Only unconfirmed rows."),
+) -> None:
+    """Show the identity table."""
+    settings = _settings()
+    conn = _conn(settings)
+    sql = (
+        "SELECT a.alias, a.confidence, i.identity_id, i.display_name, i.kind "
+        "FROM identity_aliases a JOIN identities i USING(identity_id)"
+    )
+    if proposed:
+        sql += " WHERE a.confidence='proposed'"
+    rows = conn.execute(sql + " ORDER BY i.display_name").fetchall()
+    if not rows:
+        typer.echo("no identities yet — run `pipeline identity harvest --apply`")
+        return
+    for r in rows:
+        mark = "✓" if r["confidence"] == "curated" else "?"
+        typer.echo(f" {mark} {r['display_name']:<28} {r['kind']:<7} {r['alias']:<44} {r['identity_id']}")
+
+
+@identity_app.command("set")
+def identity_set(
+    alias: str = typer.Argument(..., help="Channel key: an email, hostname, or byline."),
+    name: str = typer.Argument(..., help="The writer's name (or the organisation's)."),
+    kind: str = typer.Option("person", "--kind", help="person | org"),
+    identity_id: Optional[str] = typer.Option(None, "--id", help="Attach to an existing identity id."),
+) -> None:
+    """Map a channel to a person (or org) and mark it curated.
+
+    Use the same `--id` for every channel one writer publishes through — that is what
+    stops their email and their site reading as two independent sources.
+    """
+    from pipeline import authors as A
+
+    settings = _settings()
+    conn = _conn(settings)
+    ident = identity_id or f"{kind}:{A.slug(name)}"
+    A.upsert_identity(conn, ident, name, kind=kind)
+    A.add_alias(conn, alias, ident, confidence="curated", source="manual")
+    conn.commit()
+    typer.secho(f"{alias} → {ident} ({name}) [curated]", fg="green")
+
+
+@identity_app.command("confirm")
+def identity_confirm(
+    alias: Optional[str] = typer.Argument(None, help="Alias to confirm; omit with --all."),
+    all_: bool = typer.Option(False, "--all", help="Confirm every proposal for a person (never orgs)."),
+) -> None:
+    """Promote proposals to curated, so they can carry corroboration."""
+    from pipeline import authors as A
+
+    settings = _settings()
+    conn = _conn(settings)
+    if all_:
+        rows = conn.execute(
+            "SELECT a.alias FROM identity_aliases a JOIN identities i USING(identity_id) "
+            "WHERE a.confidence='proposed' AND i.kind='person'"
+        ).fetchall()
+        for r in rows:
+            A.confirm(conn, r["alias"])
+        conn.commit()
+        typer.secho(f"confirmed {len(rows)} person alias(es); orgs left for review", fg="green")
+        return
+    if not alias:
+        typer.secho("give an alias, or --all", fg="red")
+        raise typer.Exit(1)
+    ok = A.confirm(conn, alias)
+    conn.commit()
+    typer.secho(f"confirmed {alias}" if ok else f"unknown alias {alias}", fg="green" if ok else "red")
 
 
 @app.command("retract")

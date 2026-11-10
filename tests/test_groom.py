@@ -1,9 +1,12 @@
 """Retroactive corpus grooming: dedup claims already in the vault, losing nothing."""
 from pipeline import corpus_dedup
 from pipeline.db import claims_index as ci
+from pipeline.ingestors.email import ingest_message
 from pipeline.ingestors.paste import add_paste
 from pipeline.orchestrator.executor import run_stage
 from pipeline.vault.writer import read_note
+
+from .conftest import FakeMsg
 
 
 def _walk(settings, conn, h):
@@ -124,3 +127,66 @@ def test_plan_round_trips_so_apply_need_not_re_run_the_pass(settings, conn, fake
     reloaded = corpus_dedup.Plan.load(path)
     assert reloaded.pairs == plan.pairs and reloaded.confirms == plan.confirms
     assert corpus_dedup.apply_merges(settings, conn, reloaded) == 1
+
+
+def test_grooming_does_not_let_one_writer_corroborate_themselves(settings, conn, fake_claims):
+    """A merge copies the absorbed claim's attestations onto the survivor. Keying that
+    copy on (author, source_hash) meant the SAME writer's other edition counted as new
+    support — within-author repetition reintroduced through the grooming path, which is
+    exactly what author-aware attestation exists to suppress."""
+    settings.raw["dedup"]["max_distance"] = -1.0
+    fake_claims["vector"] = [1, 0, 0, 0, 0, 0, 0, 0]
+
+    fake_claims["text"] = '[{"claim": "Taste differentiates software.", "quote": "q1"}]'
+    a = ingest_message(settings, conn, FakeMsg(text="edition one", from_="solo@example.com", subject="A"))
+    _walk(settings, conn, a)
+    fake_claims["text"] = '[{"claim": "Taste sets software apart.", "quote": "q2"}]'
+    b = ingest_message(settings, conn, FakeMsg(text="edition two", from_="solo@example.com", subject="B"))
+    _walk(settings, conn, b)
+
+    fake_claims["same"] = True
+    plan = corpus_dedup.plan_merges(settings, conn, max_distance=0.72)
+    corpus_dedup.apply_merges(settings, conn, plan)
+    survivor_id, _, _ = plan.pairs[0]
+
+    assert ci.get_claim(conn, survivor_id)["attestations"] == 1  # one voice, not two
+    post = read_note(settings.vault_dir / f"corpus/claims/{survivor_id}.md")
+    assert len(post.metadata["attestations"]) == 2  # both editions kept as provenance
+
+
+def test_recount_corrects_a_corpus_inflated_by_earlier_grooming(settings, conn, fake_claims):
+    settings.raw["dedup"]["max_distance"] = -1.0
+    fake_claims["vector"] = [1, 0, 0, 0, 0, 0, 0, 0]
+    fake_claims["text"] = '[{"claim": "Taste differentiates software.", "quote": "q1"}]'
+    a = ingest_message(settings, conn, FakeMsg(text="one", from_="solo@example.com", subject="A"))
+    _walk(settings, conn, a)
+    fake_claims["text"] = '[{"claim": "Taste sets software apart.", "quote": "q2"}]'
+    b = ingest_message(settings, conn, FakeMsg(text="two", from_="solo@example.com", subject="B"))
+    _walk(settings, conn, b)
+    fake_claims["same"] = True
+    plan = corpus_dedup.plan_merges(settings, conn, max_distance=0.72)
+    corpus_dedup.apply_merges(settings, conn, plan)
+    survivor_id, _, _ = plan.pairs[0]
+
+    conn.execute("UPDATE claims SET attestations=2 WHERE claim_id=?", (survivor_id,))  # the old bug
+    changed = corpus_dedup.recount_attestations(settings, conn)
+
+    assert (survivor_id, 2, 1) in changed
+    assert ci.get_claim(conn, survivor_id)["attestations"] == 1
+
+
+def test_recount_dry_run_writes_nothing(settings, conn, fake_claims):
+    """The dry run must not commit. An earlier version computed, committed, and only then
+    tried to roll back — so `pipeline recount` with no --apply silently wrote."""
+    settings.raw["dedup"]["max_distance"] = -1.0
+    fake_claims["vector"] = [1, 0, 0, 0, 0, 0, 0, 0]
+    fake_claims["text"] = '[{"claim": "One claim.", "quote": "q"}]'
+    h = ingest_message(settings, conn, FakeMsg(text="ed", from_="solo@example.com", subject="A"))
+    _walk(settings, conn, h)
+    claim_id = f"claim-{h[:8]}-00"
+    conn.execute("UPDATE claims SET attestations=7 WHERE claim_id=?", (claim_id,))
+
+    changed = corpus_dedup.recount_attestations(settings, conn, dry_run=True)
+
+    assert (claim_id, 7, 1) in changed                              # reported
+    assert ci.get_claim(conn, claim_id)["attestations"] == 7        # but not written

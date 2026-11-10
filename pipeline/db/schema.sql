@@ -129,3 +129,91 @@ CREATE TABLE IF NOT EXISTS dedup_verdicts (
   at             TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (prompt_version, model, claim_a, claim_b)
 );
+
+-- ── Author identity (web-ingestion-plan.md Part 1) ───────────────────────────
+-- `pipeline.authors.author_key` normalizes a From header to a bare email, which is a
+-- CHANNEL, not a person: `email@stratechery.com` and `stratechery.com` are the same
+-- writer, and the same essay arriving on both would otherwise read as two independent
+-- sources corroborating each other. Identity is anchored to the literal person so that
+-- guest posts, syndication, and multi-author venues attribute to whoever made the claim
+-- rather than to the pipe it arrived through.
+CREATE TABLE IF NOT EXISTS identities (
+  identity_id  TEXT PRIMARY KEY,                     -- 'person:ben-thompson' | 'org:corporate-rebels'
+  display_name TEXT NOT NULL,
+  kind         TEXT NOT NULL DEFAULT 'person',       -- person | org
+  note         TEXT,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Many channel keys resolve to one identity. `confidence` gates use: a 'proposed' row is
+-- a harvest suggestion and is NOT trusted for corroboration until confirmed, because a
+-- wrong merge fuses two real writers into one voice.
+CREATE TABLE IF NOT EXISTS identity_aliases (
+  alias       TEXT PRIMARY KEY,                      -- normalized key: email, hostname, or byline
+  identity_id TEXT NOT NULL REFERENCES identities(identity_id),
+  kind        TEXT,                                  -- email | host | byline
+  confidence  TEXT NOT NULL DEFAULT 'proposed',      -- proposed | curated
+  source      TEXT,                                  -- how we learned it (e.g. 'eml-display-name')
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_alias_identity ON identity_aliases(identity_id);
+CREATE INDEX IF NOT EXISTS idx_alias_confidence ON identity_aliases(confidence);
+
+-- ── Web backlog ledger (web-ingestion-plan.md Part 2) ────────────────────────
+-- Same inversion as the email ledger: fetch ONCE into a content-addressed archive, then
+-- page this table forever. Identity is the sha256 of the RAW response bytes, never the
+-- extracted body — the extractor is the component most likely to change, and keying on
+-- its output would turn every extractor tweak into a corpus-wide identity reset.
+CREATE TABLE IF NOT EXISTS web_backlog (
+  fetch_hash    TEXT PRIMARY KEY,                   -- sha256 of raw response bytes
+  url           TEXT NOT NULL,                      -- canonical URL
+  requested_url TEXT,                               -- what we were given, canonicalized
+  fetch_key     TEXT,                               -- blobstore key of the archived response
+  site          TEXT,                               -- hostname; the publication facet
+  title         TEXT,
+  identity_id   TEXT,                               -- resolved author, NULL = unmapped
+  content_type  TEXT,
+  http_status   INTEGER,
+  syndicated_from TEXT,                             -- set when the page declares a cross-site canonical
+  artifact_hash TEXT,                               -- normalized artifact, once extracted
+  triage        TEXT,                               -- process | drop | review | NULL
+  state         TEXT NOT NULL DEFAULT 'archived',   -- archived | ingested | duplicate | escalated
+  escalation    TEXT,                               -- cause, when state='escalated'
+  fetched_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_web_url ON web_backlog(url);
+CREATE INDEX IF NOT EXISTS idx_web_state ON web_backlog(state);
+CREATE INDEX IF NOT EXISTS idx_web_site ON web_backlog(site);
+CREATE INDEX IF NOT EXISTS idx_web_identity ON web_backlog(identity_id);
+
+-- Every exit through the escalation seam, by cause. This table IS the evidence for the
+-- deferred browser-vs-form decision: ~3/month keeps manual paste, ~30/month justifies
+-- building something. Rows are kept even when a URL is later fetched successfully, so the
+-- rate reflects what actually happened rather than what survived.
+CREATE TABLE IF NOT EXISTS web_escalations (
+  url        TEXT NOT NULL,
+  cause      TEXT NOT NULL,
+  detail     TEXT,
+  at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_escalation_cause ON web_escalations(cause);
+
+-- Running background work, so a long batch is visible where the operator actually looks
+-- rather than in a log file they have to be told about. Heartbeated by `batch_guard`.
+CREATE TABLE IF NOT EXISTS batches (
+  batch_id   TEXT PRIMARY KEY,
+  label      TEXT NOT NULL,
+  total      INTEGER,
+  done       INTEGER NOT NULL DEFAULT 0,
+  rate_key   TEXT,                                  -- which measured rate estimates the ETA
+  usd        REAL NOT NULL DEFAULT 0,
+  state      TEXT NOT NULL DEFAULT 'running',       -- running | done | stopped | failed
+  note       TEXT,
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_batches_state ON batches(state);
+
+-- Workflow grouping for batches is applied by the additive migration in connection.py
+-- (ALTER has no IF NOT EXISTS, and this file is executed on every bootstrap).

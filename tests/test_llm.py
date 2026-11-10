@@ -141,3 +141,32 @@ def test_parse_still_reads_a_wrapper_object():
     assert _parse_claims('{"claims": [{"claim": "Wrapped.", "quote": "q"}]}') == [
         {"text": "Wrapped.", "quote": "q"}
     ]
+
+
+def test_input_type_is_sent_in_the_body_not_as_a_kwarg():
+    """The OpenAI SDK rejects unknown kwargs. An earlier version caught that and retried
+    without the field, so input_type never reached the API and a whole threshold study
+    measured the unconditioned mode. It must travel in extra_body."""
+    import types
+
+    from pipeline.llm.openai_compat import OpenAICompatProvider
+
+    seen = {}
+
+    class Client:
+        def create(self, **kw):
+            seen.update(kw)
+            return types.SimpleNamespace(
+                data=[types.SimpleNamespace(embedding=[0.1, 0.2])], usage=None)
+
+    p = OpenAICompatProvider.__new__(OpenAICompatProvider)
+    p.name, p._pricing = "x", {}
+    p._client = types.SimpleNamespace(embeddings=Client())
+
+    p.embed(["t"], "m", input_type="passage")
+    assert seen["extra_body"] == {"input_type": "passage"}
+    assert "input_type" not in seen          # never a bare kwarg
+
+    seen.clear()
+    p.embed(["t"], "m")
+    assert "extra_body" not in seen          # omitted entirely when unset

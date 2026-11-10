@@ -58,6 +58,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     acols = {r["name"] for r in conn.execute("PRAGMA table_info(artifacts)")}
     if acols and "word_count" not in acols:
         conn.execute("ALTER TABLE artifacts ADD COLUMN word_count INTEGER")
+    # `batches` may predate workflow grouping.
+    bcols = {r["name"] for r in conn.execute("PRAGMA table_info(batches)")}
+    if bcols:
+        for col, ddl in (("workflow", "TEXT"), ("step", "INTEGER DEFAULT 1"),
+                         ("steps_total", "INTEGER DEFAULT 1")):
+            if col not in bcols:
+                conn.execute(f"ALTER TABLE batches ADD COLUMN {col} {ddl}")
     # `claims` may predate merged_into (retroactive corpus grooming).
     ccols = {r["name"] for r in conn.execute("PRAGMA table_info(claims)")}
     if ccols and "merged_into" not in ccols:

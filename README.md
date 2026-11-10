@@ -16,12 +16,25 @@ source that repeats it.
 - **SQLite control plane** — the DB *is* the queue, control plane, and dashboard
   backend (`jobs`, `controls`, `runs`, `costs`, `claims` tables).
 - **Provider-agnostic LLM layer** — one OpenAI-compatible adapter serves
-  **OpenAI, OpenRouter, and Ollama**; each derivation stage independently picks
-  its provider + model + params. Every call logs tokens, **cost, and latency**.
+  **OpenAI, OpenRouter, NVIDIA, and Ollama**; each derivation stage independently
+  picks its provider + model + params. Every call logs tokens, **cost, and latency**.
 - **Real derivation chain** — `source_note` → `extract_claims` (LLM) → `dedup`
   (embed + sqlite-vec nearest + LLM confirm → attest-or-create) → `entities`
   (extract + resolve → link-or-create). Claims and entities that recur across
   sources collapse into one note with multiple **attestations** / **mentions**.
+- **Author identity** — attribution is anchored to the *person*, not the channel.
+  One writer's newsletter, site, and guest posts resolve to a single identity, so
+  the same essay arriving twice cannot corroborate itself. Corroboration counts
+  distinct **voices**, never attestation entries. Unmapped channels attest
+  *provisionally* and are queued for review in the dashboard rather than blocking
+  ingestion.
+- **Web ingestion** — fetch (robots-respecting, rate-limited) or import a page you
+  saved from the browser; both land in one content-addressed archive, extract via
+  trafilatura, and pass a quality gate that holds teasers, index pages, and
+  non-English rather than deriving them.
+- **Re-derivation is explicit** — `pipeline retract` withdraws an artifact's claims
+  before a re-run, because claim ids encode extraction position and writing a second
+  pass over a first would silently reassign them.
 - **Eval-compare** — run a stage under several `{provider, model, params}`
   variants over one source and compare outputs + cost + latency before approving
   one into the vault (see [Common operations](#common-operations)).
@@ -77,11 +90,16 @@ Declared once in `config/pipeline.yaml` under `providers:`, referenced per stage
 under `models:`. Keys are read from the environment (via `.env` locally; from the
 instance environment on the box).
 
-| Provider   | `.env` key            | Notes                               |
-|------------|-----------------------|-------------------------------------|
-| OpenAI     | `OPENAI_API_KEY`      | Batch API available (50% off, later)|
-| OpenRouter | `OPENROUTER_API_KEY`  | Many models via one key             |
-| Ollama     | *(none)*              | Local, free — just run `ollama serve`|
+| Provider   | `.env` key            | Notes                                     |
+|------------|-----------------------|-------------------------------------------|
+| OpenAI     | `OPENAI_API_KEY`      | Batch API available (50% off, later)      |
+| OpenRouter | `OPENROUTER_API_KEY`  | Many models via one key                   |
+| NVIDIA     | `NVIDIA_API_KEY`      | build.nvidia.com; extraction + embeddings |
+| Ollama     | *(none)*              | Local, free — just run `ollama serve`     |
+
+The default config uses no local models: extraction and entities run on NVIDIA,
+dedup-confirm on OpenRouter, embeddings on NVIDIA. That is deliberate — a t3.small
+cannot host Ollama, so any local dependency blocks deployment.
 
 **To run fully local / free**, point stages at Ollama and pull the models:
 
@@ -95,14 +113,54 @@ then set the stage in `config/pipeline.yaml`:
 ```yaml
 models:
   extract_claims: {provider: ollama, model: gemma4:latest, params: {temperature: 0}, prompt_version: v1}
+embeddings:
+  provider: ollama
+  model: nomic-embed-text
 ```
 
-`embeddings:` (dedup) and `models.dedup:` (the same-claim confirm model) already
-default to Ollama.
+**Changing the embedder is a migration, not a setting.** `max_distance` is
+embedder-specific — L2 distances are not comparable across models, so an inherited
+threshold is meaningless — and a `vec0` index is created at a fixed width, so a new
+dimensionality cannot be written into the old one. After any change to
+`embeddings.model`:
+
+```bash
+uv run pipeline reembed --apply   # rebuild claims_vec + entities_vec
+```
+
+Vectors are derived data (`claims.text` is stored), so this is always reversible.
+
+Note `embeddings.input_type`. Asymmetric embedders (NVIDIA, Cohere, Voyage) bake a
+usage mode into the vector, and claim-to-claim dedup is *symmetric*, so both sides
+are embedded as `passage`. Omitting it is not a safe default: on
+`nemotron-3-embed-1b` the unconditioned vector is nearly orthogonal to both real
+modes, and dedup ranking fell to **worse than chance**. Providers that don't know
+the field ignore it.
 
 ## Common operations
 
 ### Ingest
+
+Web pages — fetched where robots.txt permits, or imported from a page you saved in
+the browser (no server request, so robots has nothing to say about it):
+
+```bash
+uv run pipeline web audit commoncog.com          # robots, sitemaps, feeds, terms
+uv run pipeline web scan --file backlog.md       # or pass URLs directly
+uv run pipeline web import saved.html            # or a directory of saves
+uv run pipeline web derive                       # extract → artifacts → chain
+uv run pipeline web held                         # what the quality gate distrusted
+```
+
+Weekly email batches are Saturday→Friday windows, where the window *is* the cursor:
+pulling a given week is the same operation whenever it runs, and re-running costs
+only the re-read because archiving keys on content hash.
+
+```bash
+uv run pipeline feed weeks                       # windows + what each pulled
+uv run pipeline feed pull --catch-up             # every complete week
+```
+
 
 ```bash
 echo "Taste is the differentiator; generation is cheap." \
@@ -127,6 +185,25 @@ uv run pipeline status [<ref>]              # pipeline summary or one artifact's
 
 Derived claim notes land in `vault/corpus/claims/`; each records its generating
 key and an `## Attestations` section listing every source that asserted it.
+
+### Author identity
+
+Attribution is anchored to the person who wrote something, not the address or host
+it arrived through. `config/identities.yaml` is the canonical record — one id per
+author, however many publications they write through:
+
+```bash
+uv run pipeline identity harvest --apply   # propose identities from archived headers
+uv run pipeline identity sync              # apply config/identities.yaml as curated
+uv run pipeline identity unmapped          # channels still needing a decision
+uv run pipeline identity apply --apply     # upgrade provisional attestations after mapping
+```
+
+Day to day this lives in the dashboard at `/authors`, which lists every unmapped
+channel with a one-line form to attach it to an existing author or name a new one.
+Saving writes through to the YAML and takes effect on the corpus immediately.
+Shared platforms are listed per writer (`medium.com/@stewart`), never per host —
+mapping a whole platform to one identity would merge distinct people.
 
 ### Control plane
 
@@ -162,6 +239,23 @@ uv run pipeline eval approve <ref> extract_claims 0   # commit variant 0; chain 
 Each variant's output is a separate keyed intermediate (no vault write); approve
 picks the winner and the committer stages consume it. Only producer stages are
 eval-able.
+
+### Groom the corpus retroactively
+
+The per-source `dedup` stage only sees the corpus as it stood at the time. Grooming
+gives everything a second look under the current threshold:
+
+```bash
+uv run pipeline groom --workers 8 --out plan.json   # dry run, saves the plan
+uv run pipeline groom --plan plan.json --apply      # apply without re-judging
+uv run pipeline recount --apply                     # corroboration = distinct voices
+```
+
+Merges are additive and reversible: the absorbed claim's wording is kept on the
+survivor under `alternate_phrasings`, its note moves to `corpus/claims/merged/`
+rather than being deleted, and the vault is a git repo. Corroboration counts
+distinct **voices** — one writer restating a point across editions is emphasis, not
+support.
 
 ### Inspect cost & latency
 
@@ -200,6 +294,17 @@ demand from `raw + generating key`.
 
 `config/pipeline.yaml` — blob store (`local` | `s3`), paths, `providers:`,
 per-stage `models:`, `embeddings:`, `dedup:` tuning, and worker settings.
+
+### Long-running batches
+
+Anything expected to run more than ~15 minutes reports its estimated duration and
+cost before starting, heartbeats to the `batches` table, and appears on the
+dashboard overview with task-level and workflow-level time remaining. To interrupt
+one cleanly — it finishes the current item and keeps committed progress:
+
+```bash
+uv run pipeline stop            # --clear to cancel the request
+```
 `config/prompts/` — versioned prompt files (`<stage>_<version>.md`).
 `config/feeds.yaml` — per-source attribution registry (spine ingestors, later).
 

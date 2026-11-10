@@ -53,6 +53,18 @@ providers:
       # EXTRACTION model (bake-off winner): reliable, ~GLM-5.2 quality, ~30% cheaper.
       # A `:free` slug exists ($0, shared-pool daily cap) for zero-cost runs; this is paid.
       nvidia/nemotron-3-ultra-550b-a55b: {in: 0.50, out: 2.20}
+  nvidia:
+    # NVIDIA's own build endpoint — a SECOND route to the same extraction model. The
+    # OpenRouter `:free` slug shares a throttled pool and absorbed ~18% retries under
+    # sustained load, which is what made the backlog estimate 27h serial. This is the
+    # first-party path, and it carries the identical model id.
+    type: openai_compat
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_API_KEY
+    pricing:
+      # Credits-based on the build tier rather than per-token billing; recorded as 0 so
+      # the costs table stays honest instead of inventing a rate we are not charged.
+      nvidia/nemotron-3-ultra-550b-a55b: {in: 0.0, out: 0.0}
   ollama:
     type: openai_compat
     base_url: http://localhost:11434/v1
@@ -64,8 +76,12 @@ providers:
 # model/provider for that step; the generating key rides into the note frontmatter.
 models:
   extract_claims:
-    provider: openrouter      # bake-off winner; ollama gemma4 remains a free local fallback
-    model: nvidia/nemotron-3-ultra-550b-a55b:free   # free tier while the promo lasts; paid slug is the same model
+    # Same bake-off-winning model, now via NVIDIA's FIRST-PARTY endpoint rather than the
+    # OpenRouter `:free` slug. That slug shares a throttled pool: it absorbed ~18% retries
+    # under sustained serial load, which is what turned the backlog estimate into 27h.
+    # OpenRouter remains a drop-in fallback — identical model id, just change `provider`.
+    provider: nvidia
+    model: nvidia/nemotron-3-ultra-550b-a55b
     # max_tokens is the OUTPUT cap, not a context limit: the model's window is 512k and
     # our inputs run ~6k, so input is never the constraint. At 4096 the CAP decided the
     # claim count on 7/178 pilot editions (5 of them Commoncog) — silent truncation, the
@@ -86,9 +102,19 @@ models:
   # Entity extraction + same-entity tiebreak (plan §6.4). One model, two prompts
   # (entities_extract / entities_confirm), both at this prompt_version.
   entities:
-    provider: ollama
-    model: gemma4:latest
-    params: {temperature: 0}
+    # Moved off local gemma4: 247 queued jobs at ~20-31s each is an hour-plus of GPU burn
+    # on a working laptop, which is not a long-term workflow.
+    #
+    # super-120b, not ultra: on a 6-sample bake-off against the same prompt and inputs it
+    # parsed 6/6 with no empty responses (the failure that got super REJECTED for
+    # extract_claims did not reproduce — entity output is short, so the reasoning budget
+    # is not the constraint it was there), agreed with gemma4 where gemma4 was right, and
+    # avoided gemma4's false positives: gemma4 returned "coaching/consulting/advisory" as
+    # entities, which are generic nouns, where both NVIDIA models correctly returned none.
+    # Small sample and no ground truth, so this is evidence for parity, NOT a quality win.
+    provider: nvidia
+    model: nvidia/nemotron-3-super-120b-a12b
+    params: {temperature: 0, max_tokens: 4096}
     prompt_version: v1
   #
   # Offline / free alternative for any stage — flip provider+model to Ollama:
@@ -99,8 +125,18 @@ models:
 # Write-time dedup embeddings (plan §6.3). Same provider layer as completions —
 # nomic-embed-text runs locally on Ollama (keyless, free).
 embeddings:
-  provider: ollama
-  model: nomic-embed-text
+  # Cloud embedder as of 2026-08-06, replacing local Ollama nomic-embed-text. Chosen on a
+  # threshold study over 13,244 labelled pairs from the live corpus: at every matched
+  # merge count it proposes roughly HALF the candidate pairs for the same or better yield,
+  # and precision runs 1.6-2.4x higher. It also removes the last local dependency from the
+  # derivation chain, which is what lets the pipeline run on a t3.small that cannot host
+  # Ollama. Swapping back is a `pipeline reembed` away — claims.text is stored.
+  provider: nvidia
+  model: nvidia/nemotron-3-embed-1b
+  # Asymmetric embedders bake the usage mode into the vector, and claim-to-claim dedup is
+  # symmetric — so both sides are embedded as passages. Providers that don't accept the
+  # field ignore it. Omitting it on nemotron measured WORSE than chance (AUC 0.332).
+  input_type: passage
 
 # Dedup tuning: a candidate matches an existing claim when its nearest neighbour's
 # L2 distance (unit-normalized embeddings) is below max_distance; the top-k
@@ -109,7 +145,14 @@ embeddings:
 # dedup-OFF (near-verbatim only); 0.72 ≈ cosine 0.74 catches reworded paraphrases while
 # the confirm LLM rejects far pairs. nomic beat mxbai/bge (equal quality, fewest confirms).
 #
-# POLICY (set 2026-07-30 from the pilot sweep): dedup_confirm v3 @ max_distance 0.72.
+# POLICY (set 2026-08-06): dedup_confirm v3 @ max_distance 0.95 on nemotron-3-embed-1b
+# (passage mode). L2 distances are NOT comparable across embedders, so the old 0.72 —
+# tuned for nomic — carries no meaning here; 0.95 was re-derived on the same labelled set.
+# At 0.95 it catches ~75 merges from 1,430 candidate pairs, roughly double the duplicates
+# production found at nomic/0.72 (~36 from ~969) for ~1.5x the confirm calls. Going to
+# 1.00 costs 48% more calls for 48% more merges and drops precision to 0.036 — the knee.
+#
+# PREVIOUS POLICY (2026-07-30, nomic): dedup_confirm v3 @ max_distance 0.72.
 # The sweep isolated the two levers on 1,868 pairs judged by BOTH prompts:
 #   threshold alone (v2, 0.65 -> 0.72): +103 merges
 #   prompt alone    (at 0.72, v3 -> v2): +119 merges
@@ -120,13 +163,16 @@ embeddings:
 # Known cost: v3 is strict enough to miss genuine synonyms (it split a 0.458-distance
 # pair differing only in stress/arousal and concentration/awareness).
 dedup:
-  max_distance: 0.72       # POLICY. Swept on the 1,213-claim pilot at v2/v3 x 0.65/0.72.
+  max_distance: 0.95       # POLICY, re-derived 2026-08-06 for nemotron-3-embed-1b (passage).
   shortlist_k: 5
 
 # Entity resolution tuning (plan §6.4): after an exact (name, entity_type) string
 # match, near matches within max_distance are confirmed by the entities model.
 entities:
-  max_distance: 0.6
+  # Also re-scaled for the new embedder: 0.6 was a nomic distance. Held proportional to the
+  # dedup move (0.72 -> 0.95) pending its own sweep, which needs labelled entity pairs we
+  # do not yet have — so this is a considered placeholder, not a measured threshold.
+  max_distance: 0.79
   shortlist_k: 5
 
 # Email ingestion (plan §4.1). IMAP, read-only, scoped by Gmail label. Credentials
