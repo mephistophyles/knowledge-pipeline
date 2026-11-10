@@ -135,3 +135,15 @@ def test_claiming_returns_nothing_when_everything_runnable_is_paused(settings, c
     jobs.insert_job(conn, "a", "entities", "email")
     ctl.set_control(conn, "stage", "entities", state="paused")
     assert jobs.claim_next(conn, "w1", ["entities"]) is None
+
+
+def test_job_paths_are_stored_relative_and_legacy_absolutes_remap(settings):
+    """The DB moved MacBook → Studio with 1,700+ absolute paths baked into `jobs`."""
+    inter = settings.intermediate_dir / "abc" / "extract_claims.k.json"
+    inter.parent.mkdir(parents=True, exist_ok=True)
+    inter.write_text("{}")
+    assert settings.job_path(str(inter)) == "abc/extract_claims.k.json"
+    assert settings.resolve_job_path("abc/extract_claims.k.json") == str(inter)
+    foreign = "/Users/someone/elsewhere/data/intermediate/abc/extract_claims.k.json"
+    assert settings.resolve_job_path(foreign) == str(inter)
+    assert settings.resolve_job_path("/nowhere/x.json") == "/nowhere/x.json"

@@ -343,6 +343,10 @@ def _render_artifact(detail: dict) -> str:
 def _read_output(path: str | None, limit: int = 6000) -> str:
     if not path:
         return ""
+    try:  # job paths are stored relative to the intermediate dir (or are legacy absolutes)
+        path = Settings.load().resolve_job_path(path)
+    except Exception:
+        pass
     p = Path(path)
     if not p.exists():
         return ""

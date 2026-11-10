@@ -177,14 +177,14 @@ def test_mapping_is_not_retroactive_until_applied(settings, conn, fake_claims, m
     from pipeline.ingestors.email import ingest_message
     from pipeline.orchestrator.executor import run_stage
 
-    from .conftest import FakeMsg
+    from .conftest import FakeMsg, cid
 
     fake_claims["text"] = '[{"claim": "A claim.", "quote": "q"}]'
     h = ingest_message(settings, conn, FakeMsg(text="ed", from_="new@example.com", subject="S"))
     for stage in ("source_note", "extract_claims", "dedup"):
         run_stage(settings, conn, h, stage)
 
-    note = settings.vault_dir / f"corpus/claims/claim-{h[:8]}-00.md"
+    note = settings.vault_dir / f"corpus/claims/{cid(conn, h, 0)}.md"
     from pipeline.vault.writer import read_note
     assert read_note(note).metadata["attestations"][0]["provisional"] is True
 
@@ -193,7 +193,7 @@ def test_mapping_is_not_retroactive_until_applied(settings, conn, fake_claims, m
     assert read_note(note).metadata["attestations"][0].get("provisional") is True  # still
 
     upgraded = corpus_dedup.resolve_provisional(settings, conn)
-    assert upgraded == [(f"claim-{h[:8]}-00", "person:new")]
+    assert upgraded == [(cid(conn, h, 0), "person:new")]
     att = read_note(note).metadata["attestations"][0]
     assert att["identity"] == "person:new" and "provisional" not in att
 
@@ -204,7 +204,7 @@ def test_resolve_provisional_dry_run_writes_nothing(settings, conn, fake_claims)
     from pipeline.orchestrator.executor import run_stage
     from pipeline.vault.writer import read_note
 
-    from .conftest import FakeMsg
+    from .conftest import FakeMsg, cid
 
     fake_claims["text"] = '[{"claim": "A claim.", "quote": "q"}]'
     h = ingest_message(settings, conn, FakeMsg(text="ed", from_="new@example.com", subject="S"))
@@ -214,7 +214,7 @@ def test_resolve_provisional_dry_run_writes_nothing(settings, conn, fake_claims)
     authors.add_alias(conn, "new@example.com", "person:new", confidence="curated")
 
     assert corpus_dedup.resolve_provisional(settings, conn, dry_run=True)
-    note = settings.vault_dir / f"corpus/claims/claim-{h[:8]}-00.md"
+    note = settings.vault_dir / f"corpus/claims/{cid(conn, h, 0)}.md"
     assert read_note(note).metadata["attestations"][0]["provisional"] is True
 
 
@@ -225,13 +225,13 @@ def test_saving_takes_effect_immediately_on_the_corpus(settings, conn, fake_clai
     from pipeline.orchestrator.executor import run_stage
     from pipeline.vault.writer import read_note
 
-    from .conftest import FakeMsg
+    from .conftest import FakeMsg, cid
 
     fake_claims["text"] = '[{"claim": "A claim.", "quote": "q"}]'
     h = ingest_message(settings, conn, FakeMsg(text="ed", from_="writer@example.com", subject="S"))
     for stage in ("source_note", "extract_claims", "dedup"):
         run_stage(settings, conn, h, stage)
-    note = settings.vault_dir / f"corpus/claims/claim-{h[:8]}-00.md"
+    note = settings.vault_dir / f"corpus/claims/{cid(conn, h, 0)}.md"
     assert read_note(note).metadata["attestations"][0]["provisional"] is True
 
     _client(settings, monkeypatch).post(
@@ -248,7 +248,7 @@ def test_saving_one_alias_does_not_rewrite_another_authors_notes(settings, conn,
     from pipeline.orchestrator.executor import run_stage
     from pipeline.vault.writer import read_note
 
-    from .conftest import FakeMsg
+    from .conftest import FakeMsg, cid
 
     hashes = {}
     for who in ("one@example.com", "two@example.com"):
@@ -263,5 +263,5 @@ def test_saving_one_alias_does_not_rewrite_another_authors_notes(settings, conn,
         data={"alias": "one@example.com", "identity_id": "", "name": "One", "kind": "person"},
     )
 
-    other = read_note(settings.vault_dir / f"corpus/claims/claim-{hashes['two@example.com'][:8]}-00.md")
+    other = read_note(settings.vault_dir / f"corpus/claims/{cid(conn, hashes['two@example.com'], 0)}.md")
     assert other.metadata["attestations"][0]["provisional"] is True   # untouched

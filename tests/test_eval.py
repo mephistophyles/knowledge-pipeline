@@ -43,11 +43,11 @@ def test_eval_approve_resumes_chain_from_chosen(settings, conn, fake_claims):
 
     job = jobs.get_job(conn, h, "extract_claims")
     assert job["status"] == "done"
-    assert job["output_path"] == chosen
+    assert settings.resolve_job_path(job["output_path"]) == chosen
 
     dedup = jobs.get_job(conn, h, "dedup")
     assert dedup is not None and dedup["status"] == "ready"
-    assert dedup["input_path"] == chosen  # committer consumes the approved output
+    assert dedup["input_path"] == settings.job_path(chosen)  # committer consumes the approved output
     assert result["next_stage"] == "dedup"
 
 

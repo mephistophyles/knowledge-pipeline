@@ -4,6 +4,7 @@ from pipeline.ingestors.web import add_web, normalize, site_of
 from pipeline.orchestrator.executor import run_stage
 from pipeline.storage.manifest import load_manifest
 from pipeline.vault.writer import read_note
+from .conftest import cid
 
 
 def test_site_of_strips_www():
@@ -54,5 +55,5 @@ def test_web_runs_the_standard_corpus_chain(settings, conn, fake_claims):
     for stage in ("source_note", "extract_claims", "dedup"):
         run_stage(settings, conn, h, stage)
 
-    note = read_note(settings.vault_dir / f"corpus/claims/claim-{h[:8]}-00.md")
+    note = read_note(settings.vault_dir / f"corpus/claims/{cid(conn, h, 0)}.md")
     assert note.metadata["attestations"][0]["author"] == "writer@example.com"

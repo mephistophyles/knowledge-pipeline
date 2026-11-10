@@ -6,7 +6,7 @@ from pipeline.ingestors.paste import add_paste
 from pipeline.orchestrator.executor import run_stage
 from pipeline.vault.writer import read_note
 
-from .conftest import FakeMsg
+from .conftest import FakeMsg, cid
 
 
 def _walk(settings, conn, h):
@@ -41,7 +41,7 @@ def test_groom_dry_run_writes_nothing(settings, conn, fake_claims):
     fake_claims["same"] = True
     corpus_dedup.plan_merges(settings, conn, max_distance=0.72)
 
-    assert (settings.vault_dir / f"corpus/claims/claim-{b[:8]}-00.md").exists()
+    assert (settings.vault_dir / f"corpus/claims/{cid(conn, b, 0)}.md").exists()
     assert conn.execute("SELECT COUNT(*) FROM claims WHERE merged_into IS NOT NULL").fetchone()[0] == 0
 
 
@@ -95,7 +95,7 @@ def test_live_dedup_attests_to_the_survivor_of_an_earlier_merge(settings, conn, 
     c = add_paste(settings, conn, "source C", source_url="https://c")
     _walk(settings, conn, c)
 
-    assert not (settings.vault_dir / f"corpus/claims/claim-{c[:8]}-00.md").exists()  # no new note
+    assert not (settings.vault_dir / f"corpus/claims/{cid(conn, c, 0)}.md").exists()  # no new note
     survivor = read_note(settings.vault_dir / f"corpus/claims/{survivor_id}.md")
     assert "q C" in survivor.content  # the attestation landed on the survivor
     assert ci.get_claim(conn, absorbed_id)["merged_into"] == survivor_id  # merge untouched
@@ -115,7 +115,7 @@ def test_resolve_live_follows_a_chain_and_refuses_to_spin_on_a_cycle(conn):
 
 def test_stored_vectors_are_reusable_so_grooming_never_re_embeds(settings, conn, fake_claims):
     a, _ = _two_similar_claims(settings, conn, fake_claims)
-    vec = ci.get_vector(conn, f"claim-{a[:8]}-00")
+    vec = ci.get_vector(conn, cid(conn, a, 0))
     assert vec is not None and len(vec) == 8
 
 
@@ -186,7 +186,7 @@ def test_recount_dry_run_writes_nothing(settings, conn, fake_claims):
     fake_claims["text"] = '[{"claim": "One claim.", "quote": "q"}]'
     h = ingest_message(settings, conn, FakeMsg(text="ed", from_="solo@example.com", subject="A"))
     _walk(settings, conn, h)
-    claim_id = f"claim-{h[:8]}-00"
+    claim_id = cid(conn, h, 0)
     conn.execute("UPDATE claims SET attestations=7 WHERE claim_id=?", (claim_id,))
 
     changed = corpus_dedup.recount_attestations(settings, conn, dry_run=True)

@@ -22,7 +22,7 @@ from datetime import date
 from pathlib import Path
 from typing import Callable
 
-from pipeline import authors
+from pipeline import authors, claim_identity
 from pipeline.db import claims_index, costs, entities_index
 from pipeline.llm import Message, gen_key
 from pipeline.llm import prompts, registry
@@ -121,18 +121,6 @@ def dedup(ctx: StageContext) -> str:
     candidates = data.get("claims", [])
     source_id = _source_id(ctx)
 
-    # Claim ids encode extraction position, so committing a second pass on top of a first
-    # reassigns them — rewriting notes other sources attested to and orphaning the tail
-    # when the new pass yields fewer claims. Re-derivation must retract first.
-    prior = ctx.conn.execute(
-        "SELECT COUNT(*) FROM claims WHERE artifact_hash=?", (ctx.artifact_hash,)
-    ).fetchone()[0]
-    if prior:
-        raise RuntimeError(
-            f"{ctx.artifact_hash[:12]} already has {prior} committed claim(s); "
-            f"run `pipeline retract {ctx.artifact_hash[:12]}` before re-deriving"
-        )
-
     emb_cfg = ctx.settings.embeddings_config
     dcfg = ctx.settings.dedup_config
     emb_provider = registry.get_provider(ctx.settings, emb_cfg["provider"])
@@ -140,50 +128,80 @@ def dedup(ctx: StageContext) -> str:
     confirm_provider = registry.get_provider(ctx.settings, confirm_mc.provider)
     confirm_prompt = prompts.load_prompt(ctx.settings, "dedup_confirm", confirm_mc.prompt_version)
 
-    new_ids: list[str] = []
-    attested: list[str] = []
+    def confirm(a_text: str, b_text: str) -> bool:
+        verdict = confirm_provider.complete(
+            [Message("system", confirm_prompt), Message("user", f"A: {a_text}\nB: {b_text}")],
+            confirm_mc.model, confirm_mc.params,
+        )
+        costs.record(
+            ctx.conn, ctx.artifact_hash, "dedup:confirm", verdict.model,
+            verdict.tokens_in, verdict.tokens_out, verdict.usd,
+            provider=verdict.provider, latency_ms=verdict.latency_ms,
+        )
+        return _parse_same(verdict.text)
+
+    # Re-deriving a source that already committed claims reconciles against them, so
+    # claim IDs survive rewording (see pipeline/claim_identity.py).
+    rederive = claim_identity.Rederivation(
+        ctx, max_distance=dcfg["max_distance"], shortlist_k=dcfg["shortlist_k"]
+    )
+    own_ids = rederive.prior_ids
+
+    # Embed everything first: re-derivation plans its matches over the whole pass.
+    items: list[claim_identity.Candidate] = []
     for i, c in enumerate(candidates):
         text = (c.get("text") or "").strip()
         if not text:
             continue
-        quote = (c.get("quote") or "").strip()
-
         emb = emb_provider.embed([text], emb_cfg["model"],
                                  input_type=emb_cfg.get("input_type"))
         costs.record(
             ctx.conn, ctx.artifact_hash, "dedup:embed", emb.model, emb.tokens, 0, emb.usd,
             provider=emb.provider, latency_ms=emb.latency_ms,
         )
-        vec = _normalize(emb.vectors[0])
+        items.append(claim_identity.Candidate(i, text, (c.get("quote") or "").strip(),
+                                              _normalize(emb.vectors[0])))
+    planned = rederive.plan(items, confirm) if rederive else {}
+
+    new_ids: list[str] = []
+    attested: list[str] = []
+    reasserted: set[str] = set()
+    for item in items:
+        text, quote, vec = item.text, item.quote, item.vector
+
+        if item.index in planned:
+            prior_id, dist, method = planned[item.index]
+            rederive.keep(prior_id, text, vec, _attestation(ctx, quote, key.get("model")),
+                          key.get("model"), dist, method)
+            continue
 
         matched_id = None
-        for m in claims_index.nearest(ctx.conn, vec, dcfg["shortlist_k"]):
-            if m["distance"] > dcfg["max_distance"]:
+        considered = 0
+        for m in claims_index.nearest(ctx.conn, vec, dcfg["shortlist_k"] + len(own_ids)):
+            if m["claim_id"] in own_ids:
+                continue  # this source's previous pass is reconciled above, not attested to
+            if m["distance"] > dcfg["max_distance"] or considered >= dcfg["shortlist_k"]:
                 break  # sorted ascending — nothing closer remains
-            verdict = confirm_provider.complete(
-                [Message("system", confirm_prompt), Message("user", f"A: {m['text']}\nB: {text}")],
-                confirm_mc.model, confirm_mc.params,
-            )
-            costs.record(
-                ctx.conn, ctx.artifact_hash, "dedup:confirm", verdict.model,
-                verdict.tokens_in, verdict.tokens_out, verdict.usd,
-                provider=verdict.provider, latency_ms=verdict.latency_ms,
-            )
-            if _parse_same(verdict.text):
+            considered += 1
+            if confirm(m["text"], text):
                 # A groomed-away claim keeps its vector, so the shortlist can return one
                 # whose note now lives under `merged/`; the attestation goes to whichever
                 # claim absorbed it.
-                matched_id = claims_index.resolve_live(ctx.conn, m["claim_id"])
+                resolved = claims_index.resolve_live(ctx.conn, m["claim_id"])
+                if resolved in own_ids:
+                    continue  # merged into this source's own previous claim: reconciled, not attested
+                matched_id = resolved
                 break
 
         if matched_id:
+            reasserted.add(matched_id)
             # Author-aware: a repeat from an author already attesting this claim is
             # emphasis, not corroboration — merge silently without bumping the count.
             # `text` is passed so the absorbed phrasing is preserved, not discarded.
             if _append_attestation(ctx, matched_id, _attestation(ctx, quote, key.get("model")), text):
                 attested.append(matched_id)
         else:
-            claim_id = f"claim-{ctx.artifact_hash[:8]}-{i:02d}"
+            claim_id = claim_identity.mint_claim_id(ctx.conn)
             att = _attestation(ctx, quote, key.get("model"))
             metadata = fm.claim_note(
                 source_hash=ctx.artifact_hash,
@@ -199,12 +217,19 @@ def dedup(ctx: StageContext) -> str:
             claims_index.add_claim(
                 ctx.conn, claim_id, ctx.artifact_hash, text, ctx.manifest.source_url, key.get("model"), vec
             )
+            claim_identity.record(ctx.conn, claim_id, "minted",
+                                  artifact_hash=ctx.artifact_hash, new_text=text)
             new_ids.append(claim_id)
 
-    ctx.vault.commit(f"[claims] {source_id}: +{len(new_ids)} new, {len(attested)} attested")
-    return ctx.write_intermediate(
-        "dedup.json", {"new": new_ids, "attested": attested, "count": len(new_ids)}
-    )
+    summary = f"+{len(new_ids)} new, {len(attested)} attested"
+    out = {"new": new_ids, "attested": attested, "count": len(new_ids)}
+    if rederive:
+        rep = rederive.finish(reasserted)
+        summary += f"; re-derived: {rep.summary()}"
+        out["rederive"] = {"kept": rep.kept, "transferred": rep.transferred,
+                           "retired": rep.retired, "detached": rep.detached}
+    ctx.vault.commit(f"[claims] {source_id}: {summary}")
+    return ctx.write_intermediate("dedup.json", out)
 
 
 # ── dedup helpers ─────────────────────────────────────────────────────────────

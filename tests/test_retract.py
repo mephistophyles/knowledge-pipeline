@@ -1,5 +1,6 @@
-"""Retract-then-rederive: claim ids encode extraction position, so re-derivation has to
-withdraw the previous pass rather than write on top of it."""
+"""Retract: withdraw one source's claims from the corpus entirely. Re-derivation no
+longer needs it (dedup reconciles; see test_claim_identity.py), but it stays as the
+explicit "this source is gone" operation."""
 import pytest
 
 from pipeline import authors, corpus_dedup, retract
@@ -7,6 +8,7 @@ from pipeline.db import claims_index as ci
 from pipeline.ingestors.paste import add_paste
 from pipeline.orchestrator.executor import run_stage
 from pipeline.vault.writer import read_note
+from .conftest import cid
 
 
 def _walk(settings, conn, h):
@@ -24,7 +26,7 @@ def _source(settings, conn, fake_claims, body, claim, quote, url):
 # ── (1) owned claims ──────────────────────────────────────────────────────────
 def test_retract_removes_row_vector_and_note(settings, conn, fake_claims):
     h = _source(settings, conn, fake_claims, "source A", "Taste differentiates software.", "q", "https://a")
-    claim_id = f"claim-{h[:8]}-00"
+    claim_id = cid(conn, h, 0)
     assert (settings.vault_dir / f"corpus/claims/{claim_id}.md").exists()
 
     report = retract.retract(settings, conn, h)
@@ -56,7 +58,7 @@ def test_retract_detaches_attestations_it_left_elsewhere(settings, conn, fake_cl
     fake_claims["same"] = True
     b = _source(settings, conn, fake_claims, "source B", "Taste sets software apart.", "q B", "https://b")
 
-    survivor = f"claim-{a[:8]}-00"
+    survivor = cid(conn, a, 0)
     assert ci.get_claim(conn, survivor)["attestations"] == 2
 
     report = retract.retract(settings, conn, b)
@@ -83,7 +85,7 @@ def _merged_pair(settings, conn, fake_claims):
 
 def test_retracting_the_absorbed_side_unpicks_the_survivor(settings, conn, fake_claims):
     a, b, survivor_id, absorbed_id = _merged_pair(settings, conn, fake_claims)
-    absorbed_owner = b if absorbed_id.startswith(f"claim-{b[:8]}") else a
+    absorbed_owner = ci.get_claim(conn, absorbed_id)["artifact_hash"]
 
     report = retract.retract(settings, conn, absorbed_owner)
 
@@ -99,7 +101,7 @@ def test_retracting_the_survivor_restores_the_claim_it_absorbed(settings, conn, 
     """Otherwise the absorbed note is orphaned under merged/, pointing at a survivor
     that no longer exists — exactly the residue the 2026-08-01 re-extraction left."""
     a, b, survivor_id, absorbed_id = _merged_pair(settings, conn, fake_claims)
-    survivor_owner = a if survivor_id.startswith(f"claim-{a[:8]}") else b
+    survivor_owner = ci.get_claim(conn, survivor_id)["artifact_hash"]
 
     report = retract.retract(settings, conn, survivor_owner)
 
@@ -126,14 +128,6 @@ def test_no_orphans_remain_after_retracting_either_side(settings, conn, fake_cla
     assert live_notes == live_rows
 
 
-# ── the guard ─────────────────────────────────────────────────────────────────
-def test_dedup_refuses_to_commit_over_a_previous_pass(settings, conn, fake_claims):
-    h = _source(settings, conn, fake_claims, "source A", "Taste differentiates software.", "q", "https://a")
-    run_stage(settings, conn, h, "extract_claims")
-    with pytest.raises(RuntimeError, match="retract"):
-        run_stage(settings, conn, h, "dedup")
-
-
 def test_retract_then_rederive_is_the_supported_path(settings, conn, fake_claims):
     h = _source(settings, conn, fake_claims, "source A", "Truncated run.", "q1", "https://a")
     retract.retract(settings, conn, h)
@@ -146,8 +140,8 @@ def test_retract_then_rederive_is_the_supported_path(settings, conn, fake_claims
     run_stage(settings, conn, h, "dedup")
 
     rows = conn.execute("SELECT claim_id FROM claims WHERE artifact_hash=?", (h,)).fetchall()
-    assert sorted(r["claim_id"] for r in rows) == [f"claim-{h[:8]}-00", f"claim-{h[:8]}-01"]
-    assert (settings.vault_dir / f"corpus/claims/claim-{h[:8]}-01.md").exists()
+    assert sorted(r["claim_id"] for r in rows) == [cid(conn, h, 0), cid(conn, h, 1)]
+    assert (settings.vault_dir / f"corpus/claims/{cid(conn, h, 1)}.md").exists()
 
 
 def test_retract_is_a_no_op_on_an_artifact_with_no_claims(settings, conn, fake_claims):

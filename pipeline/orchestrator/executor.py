@@ -40,7 +40,7 @@ def run_stage(
     handler = get_handler(stage)
     output_path = handler(ctx)  # writes intermediate before we touch job state
 
-    jobs.mark_done(conn, artifact_hash, stage, output_path)
+    jobs.mark_done(conn, artifact_hash, stage, settings.job_path(output_path))
 
     nxt = stages.next_stage(source_type, stage)
     if nxt is not None:
@@ -48,6 +48,6 @@ def run_stage(
         # reprocess=True: this stage just produced fresh output, so a downstream stage
         # that already ran did so against stale input and must run again.
         jobs.insert_job(
-            conn, artifact_hash, nxt, source_type, status=status, input_path=output_path, reprocess=True
+            conn, artifact_hash, nxt, source_type, status=status, input_path=settings.job_path(output_path), reprocess=True
         )
     return StageOutcome(output_path=output_path, next_stage=nxt)

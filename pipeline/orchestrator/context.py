@@ -62,5 +62,5 @@ class StageContext:
             manifest=load_manifest(store, artifact_hash),
             blobstore=store,
             vault=VaultWriter(settings.vault_dir),
-            input_path=input_path,
+            input_path=settings.resolve_job_path(input_path),
         )
